@@ -17,7 +17,10 @@ from rclpy.qos import (
     ReliabilityPolicy,
     qos_profile_sensor_data,
 )
+from tf2_msgs.msg import TFMessage
 from visualization_msgs.msg import Marker, MarkerArray
+
+from .gazebo_pose_sync import extract_model_pose
 
 
 def _load_rect_fallback_from_share() -> tuple[list[float], list[float]] | None:
@@ -85,6 +88,18 @@ class WorldMarkersNode(Node):
             self._on_carton,
             qos_profile_sensor_data,
         )
+        self.create_subscription(
+            TFMessage,
+            "/world/arm_world/pose/info",
+            self._on_world_pose_info,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            TFMessage,
+            "/world/arm_world/dynamic_pose/info",
+            self._on_world_pose_info,
+            qos_profile_sensor_data,
+        )
         # depth 过小 + DDS 缓冲不足时 RViz 可能收不到 Marker（表现为物体/纸箱“消失”）
         marker_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -124,6 +139,14 @@ class WorldMarkersNode(Node):
         if abs(p.x) < 1e-5 and abs(p.y) < 1e-5 and abs(p.z) < 1e-5:
             return
         self._carton = msg
+
+    def _on_world_pose_info(self, msg: TFMessage) -> None:
+        rect = extract_model_pose(msg, "rect_pickup")
+        if rect is not None:
+            self._on_rect(rect)
+        carton = extract_model_pose(msg, "carton_box")
+        if carton is not None:
+            self._on_carton(carton)
 
     def _pose_to_base(self, ps: PoseStamped) -> PoseStamped:
         raw = (ps.header.frame_id or "").strip()
@@ -448,14 +471,19 @@ def main() -> None:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except RuntimeError as exc:
+        # ros_gz_bridge Pose_V -> TFMessage can race with shutdown and throw from rclpy
+        # while converting a message. Treat that as a clean shutdown path.
+        if rclpy.ok() and "Unable to convert call argument" not in str(exc):
+            raise
     finally:
         try:
             node.destroy_node()
-        except Exception:
+        except BaseException:
             pass
         try:
             rclpy.shutdown()
-        except Exception:
+        except BaseException:
             pass
 
 

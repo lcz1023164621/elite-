@@ -9,6 +9,9 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import JointState
+from tf2_msgs.msg import TFMessage
+
+from .gazebo_pose_sync import extract_model_pose
 
 
 class SystemWatchdog(Node):
@@ -35,6 +38,8 @@ class SystemWatchdog(Node):
         self.create_subscription(JointState, "/joint_states", self._on_joint, 10)
         self.create_subscription(PoseStamped, "/model/rect_pickup/pose", self._on_rect, 10)
         self.create_subscription(PoseStamped, "/model/carton_box/pose", self._on_carton, 10)
+        self.create_subscription(TFMessage, "/world/arm_world/pose/info", self._on_world_pose_info, 10)
+        self.create_subscription(TFMessage, "/world/arm_world/dynamic_pose/info", self._on_world_pose_info, 10)
         period = max(0.2, float(self.get_parameter("check_period_sec").value))
         self.create_timer(period, self._tick)
 
@@ -55,6 +60,14 @@ class SystemWatchdog(Node):
         p = msg.pose.position
         if abs(p.x) > 1e-6 or abs(p.y) > 1e-6 or abs(p.z) > 1e-6:
             self._carton_pose_ok = True
+
+    def _on_world_pose_info(self, msg: TFMessage) -> None:
+        rect = extract_model_pose(msg, "rect_pickup")
+        if rect is not None:
+            self._on_rect(rect)
+        carton = extract_model_pose(msg, "carton_box")
+        if carton is not None:
+            self._on_carton(carton)
 
     def _tick(self) -> None:
         frame_root = str(self.get_parameter("frame_root").value)
@@ -97,14 +110,17 @@ def main() -> None:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except RuntimeError as exc:
+        if rclpy.ok() and "Unable to convert call argument" not in str(exc):
+            raise
     finally:
         try:
             node.destroy_node()
-        except Exception:
+        except BaseException:
             pass
         try:
             rclpy.shutdown()
-        except Exception:
+        except BaseException:
             pass
 
 

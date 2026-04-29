@@ -41,10 +41,15 @@ from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from ros_gz_interfaces.msg import Entity
+from ros_gz_interfaces.srv import SetEntityPose
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import Bool, Empty
+from tf2_msgs.msg import TFMessage
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+from .gazebo_pose_sync import extract_model_pose
 
 _ARM_JOINTS = [
     "shoulder_pan_joint",
@@ -99,7 +104,7 @@ def _load_scene_fallback_xyz() -> tuple[list[float], list[float]]:
     return rect_xyz, carton_xyz
 
 
-def _spin_future(node: Node, fut, timeout_sec: float, label: str) -> bool:
+def _spin_future(node: Node, fut, timeout_sec: float, label: str, log_timeout: bool = True) -> bool:
     """
     在后台 MultiThreadedExecutor 已 spin 本节点时，不能用 spin_until_future_complete
     （会与 executor 争用同一 Node，导致 IK/MoveGroup future 永不完成 → 机械臂不动）。
@@ -110,7 +115,8 @@ def _spin_future(node: Node, fut, timeout_sec: float, label: str) -> bool:
         time.sleep(0.005)
     if fut.done():
         return True
-    node.get_logger().error(f"{label}: 等待结果超时（{timeout_sec}s），请检查网络/DDS 或 move_group 是否存活")
+    if log_timeout:
+        node.get_logger().error(f"{label}: 等待结果超时（{timeout_sec}s），请检查网络/DDS 或 move_group 是否存活")
     return False
 
 
@@ -466,8 +472,8 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("move_acceleration_scale", 0.35)
         self.declare_parameter("far_move_velocity_scale", 0.45)
         self.declare_parameter("far_move_acceleration_scale", 0.45)
-        self.declare_parameter("near_move_velocity_scale", 0.25)
-        self.declare_parameter("near_move_acceleration_scale", 0.25)
+        self.declare_parameter("near_move_velocity_scale", 0.40)
+        self.declare_parameter("near_move_acceleration_scale", 0.40)
         self.declare_parameter("rect_fallback_pose_xyz", rect_fb_xyz)
         self.declare_parameter("rect_fallback_wait_sec", 8.0)
         self.declare_parameter("carton_fallback_pose_xyz", carton_fb_xyz)
@@ -481,13 +487,16 @@ class AutoPickPlaceNode(Node):
 
         self.declare_parameter("suction_touch_vertical_tol", 0.30)
         self.declare_parameter("suction_touch_axis_down_min", 0.90)
-        self.declare_parameter("suction_attach_burst_count", 10)
-        self.declare_parameter("suction_attach_burst_interval_sec", 0.04)
-        self.declare_parameter("suction_attach_wait_sec", 2.8)
+        self.declare_parameter("suction_attach_burst_count", 25)
+        self.declare_parameter("suction_attach_burst_interval_sec", 0.06)
+        self.declare_parameter("suction_attach_wait_sec", 4.5)
         self.declare_parameter("pickup_probe_lift_z", 0.025)
         self.declare_parameter("pickup_probe_min_follow_z", 0.010)
         self.declare_parameter("pickup_probe_require_follow_if_live_pose", True)
         self.declare_parameter("allow_unverified_sim_attach", True)
+        self.declare_parameter("fake_attach_set_pose_fallback", True)
+        self.declare_parameter("fake_attach_service", "/world/arm_world/set_pose")
+        self.declare_parameter("fake_attach_update_hz", 20.0)
         self.declare_parameter("ik_service", "/compute_ik")
         # 官方 Elite 栈使用 ros2_control + MoveIt 执行，默认通过 MoveIt IK/轨迹控制器下发。
         self.declare_parameter("use_compute_ik", True)
@@ -497,13 +506,14 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("pre_pick_try_clearances", [0.10, 0.14, 0.18, 0.24])
         self.declare_parameter("pick_posture_hint", [0.0, -1.25, 1.25, -1.60, 1.57, 0.0])
         self.declare_parameter("place_posture_hint", [0.0, -0.90, 1.10, -1.55, 1.57, 0.0])
-        self.declare_parameter("move_to_start_face_pose", True)
+        self.declare_parameter("move_to_start_face_pose", False)
         self.declare_parameter("start_face_posture_hint", [0.0, -1.57, 0.0, -1.57, 1.57, 0.0])
         # 默认按“物体+箱子中点方向”自动朝向；若关闭则使用 start_face_joint1_rad。
         self.declare_parameter("start_face_use_scene_midpoint_yaw", True)
         self.declare_parameter("start_face_joint1_rad", 0.0)
+        self.declare_parameter("pick_yaw_follow_start_face", True)
         # 官方 shoulder_pan_joint 零位按官方 kinematics.yaml 定义；该偏置仅用于预抓取种子。
-        self.declare_parameter("joint1_world_yaw_offset_rad", 0.0)
+        self.declare_parameter("joint1_world_yaw_offset_rad", -1.5708)
         # 桥接偶发抖动时，实时 pose 可能跳变；默认关闭实时覆盖，优先使用已知几何中心。
         self.declare_parameter("refresh_top_from_live_pose", False)
         self.declare_parameter("refresh_top_max_delta_xy", 0.20)
@@ -515,9 +525,10 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("place_point_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter("cartesian_step_max_m", 0.008)
         self.declare_parameter("cartesian_step_max_rad", 0.12)
-        self.declare_parameter("cartesian_cmd_period_sec", 0.045)
-        self.declare_parameter("cartesian_settle_timeout_sec", 6.0)
-        self.declare_parameter("cartesian_settle_tol_rad", 0.030)
+        self.declare_parameter("cartesian_cmd_period_sec", 0.050)
+        self.declare_parameter("cartesian_point_time_from_start_sec", 0.20)
+        self.declare_parameter("cartesian_settle_timeout_sec", 12.0)
+        self.declare_parameter("cartesian_settle_tol_rad", 0.080)
         self.declare_parameter("cartesian_ik_max_iters", 140)
         self.declare_parameter("cartesian_ik_pos_tol_m", 0.004)
         self.declare_parameter("cartesian_ik_ori_tol_rad", 0.20)
@@ -562,17 +573,19 @@ class AutoPickPlaceNode(Node):
         # 发送 attach 指令前额外等待秒数，确保吸盘与物体接触已稳定。
         self.declare_parameter("pre_attach_settle_sec", 0.6)
         self.declare_parameter("dense_waypoint_descent_enabled", True)
-        self.declare_parameter("dense_waypoint_step_m", 0.004)
+        self.declare_parameter("dense_waypoint_step_m", 0.012)
         self.declare_parameter("dense_waypoint_xy_correction_gain", 0.85)
-        self.declare_parameter("dense_waypoint_xy_correction_max_m", 0.008)
+        self.declare_parameter("dense_waypoint_xy_correction_max_m", 0.015)
         self.declare_parameter("dense_waypoint_orientation_weight", 3.0)
-        self.declare_parameter("dense_waypoint_settle_sec", 0.04)
-        self.declare_parameter("dense_waypoint_max_xy_drift_m", 0.03)
+        self.declare_parameter("dense_waypoint_settle_sec", 0.01)
+        self.declare_parameter("dense_waypoint_point_time_sec", 0.06)
+        self.declare_parameter("dense_waypoint_max_xy_drift_m", 0.08)
+        self.declare_parameter("touch_object_push_abort_m", 0.025)
         self.declare_parameter("staged_pregrasp_enabled", True)
         self.declare_parameter("staged_pregrasp_clearances", [0.24, 0.20, 0.16, 0.12, 0.09])
         self.declare_parameter("staged_pregrasp_settle_sec", 0.5)
         # 抓取关键阶段的关节姿态护栏：拒绝“可达但不可抓取”的反肘/绕腕解。
-        self.declare_parameter("pick_pose_guard_enabled", False)
+        self.declare_parameter("pick_pose_guard_enabled", True)
         self.declare_parameter("pick_pose_guard_joint2_min", -1.95)
         self.declare_parameter("pick_pose_guard_joint2_max", -0.10)
         self.declare_parameter("pick_pose_guard_joint3_min", -0.08)
@@ -587,7 +600,7 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("adaptive_touch_target_enabled", True)
         self.declare_parameter("adaptive_touch_max_adjust_m", 0.03)
         self.declare_parameter("arm_collision_check_enabled", True)
-        self.declare_parameter("arm_collision_link_radii", [0.04, 0.06, 0.05, 0.035, 0.035])
+        self.declare_parameter("arm_collision_link_radii", [0.04, 0.06, 0.05, 0.035, 0.035, 0.035])
         self.declare_parameter("arm_collision_margin", 0.005)
 
         self._tf_buffer = tf2_ros.Buffer()
@@ -608,6 +621,20 @@ class AutoPickPlaceNode(Node):
             callback_group=self._cb,
         )
         self.create_subscription(
+            TFMessage,
+            "/world/arm_world/pose/info",
+            self._on_world_pose_info,
+            qos_profile_sensor_data,
+            callback_group=self._cb,
+        )
+        self.create_subscription(
+            TFMessage,
+            "/world/arm_world/dynamic_pose/info",
+            self._on_world_pose_info,
+            qos_profile_sensor_data,
+            callback_group=self._cb,
+        )
+        self.create_subscription(
             JointState,
             "/joint_states",
             self._on_js,
@@ -617,9 +644,14 @@ class AutoPickPlaceNode(Node):
         self._ik_client = None
         self._scene_client = self.create_client(ApplyPlanningScene, "/apply_planning_scene")
         self._scene_get_client = self.create_client(GetPlanningScene, "/get_planning_scene")
+        self._set_pose_client = self.create_client(
+            SetEntityPose,
+            str(self.get_parameter("fake_attach_service").value),
+        )
         self._action = ActionClient(self, MoveGroup, "move_action")
         self._pub_attach = self.create_publisher(Empty, "/cs612/suction/attach", 10)
         self._pub_detach = self.create_publisher(Empty, "/cs612/suction/detach", 10)
+        self._pub_visual_attached = self.create_publisher(Bool, "/cs612/suction/attached_visual_state", 10)
         self._traj_pub = self.create_publisher(
             JointTrajectory,
             "/joint_trajectory_controller/joint_trajectory",
@@ -639,6 +671,10 @@ class AutoPickPlaceNode(Node):
         self._rect_fallback_used = False
         self._carton_fallback_used = False
         self._suction_attached: bool | None = None
+        self._rect_pose_can_move = False
+        self._fake_attach_active = False
+        self._fake_attach_stop = threading.Event()
+        self._fake_attach_thread: threading.Thread | None = None
         self._motion_profile = "default"
         self._joint_kin: list[_JointKinematic] = []
         self._tool_origin_xyz = (0.0, 0.0, 0.0)
@@ -834,7 +870,11 @@ class AutoPickPlaceNode(Node):
         pose_q = _rot_to_quat(r)
         return pose_p, pose_q
 
-    def _publish_joint_vector(self, joints: Sequence[float]) -> None:
+    def _publish_joint_vector(
+        self,
+        joints: Sequence[float],
+        lead_sec_override: float | None = None,
+    ) -> None:
         if len(joints) < len(_ARM_JOINTS):
             return
         traj = JointTrajectory()
@@ -842,7 +882,14 @@ class AutoPickPlaceNode(Node):
         traj.joint_names = list(_ARM_JOINTS)
         point = JointTrajectoryPoint()
         point.positions = [float(joints[i]) for i in range(len(_ARM_JOINTS))]
-        point.time_from_start = Duration(sec=0, nanosec=200_000_000)
+        if lead_sec_override is None:
+            lead_sec = max(0.20, float(self.get_parameter("cartesian_point_time_from_start_sec").value))
+        else:
+            lead_sec = max(0.04, float(lead_sec_override))
+        point.time_from_start = Duration(
+            sec=int(lead_sec),
+            nanosec=int((lead_sec - int(lead_sec)) * 1_000_000_000),
+        )
         traj.points.append(point)
         self._traj_pub.publish(traj)
 
@@ -1063,6 +1110,12 @@ class AutoPickPlaceNode(Node):
 
         q_seed = [self._joint_limit_clamp(i, float(v)) for i, v in enumerate(cur)]
         command_seed = list(cur)
+        initial_top = None
+        push_abort = max(0.005, float(self.get_parameter("touch_object_push_abort_m").value))
+        if collision_rect_half is not None:
+            initial_top = self._current_rect_top_live(list(collision_rect_half)) or self._current_rect_top(
+                list(collision_rect_half)
+            )
         self.get_logger().info(
             f"Cartesian: {label} steps={steps} target=({tgt.x:.3f},{tgt.y:.3f},{tgt.z:.3f})"
         )
@@ -1098,7 +1151,36 @@ class AutoPickPlaceNode(Node):
                         f"{label}: 机械臂与物体碰撞，停止运动: {coll_desc}"
                     )
                     return False
+                live_top = self._current_rect_top_live(list(collision_rect_half))
+                if initial_top is not None and live_top is not None:
+                    push_dxy = math.hypot(
+                        float(live_top.x) - float(initial_top.x),
+                        float(live_top.y) - float(initial_top.y),
+                    )
+                    if push_dxy > push_abort:
+                        self.get_logger().error(
+                            f"{label}: 物体横向漂移 {push_dxy:.4f}m > {push_abort:.4f}m，"
+                            "停止下压以避免继续推走物体"
+                        )
+                        return False
         if not self._wait_joint_goal(command_seed, label):
+            final_pose = self._current_tcp_pose()
+            if final_pose is not None:
+                actual_p, actual_q = final_pose
+                pos_err = math.sqrt(
+                    (float(actual_p.x) - float(tgt.x)) ** 2
+                    + (float(actual_p.y) - float(tgt.y)) ** 2
+                    + (float(actual_p.z) - float(tgt.z)) ** 2
+                )
+                ori_err = self._quat_angle(actual_q, orientation)
+                pos_tol = max(0.008, float(self.get_parameter("cartesian_ik_pos_tol_m").value) * 4.0)
+                ori_tol = max(0.20, float(self.get_parameter("cartesian_ik_ori_tol_rad").value) * 1.5)
+                if pos_err <= pos_tol and ori_err <= ori_tol:
+                    self.get_logger().warn(
+                        f"{label}: 关节目标未完全收敛，但 TCP 已到位 "
+                        f"(pos_err={pos_err:.4f}m <= {pos_tol:.4f}, ori_err={ori_err:.3f}rad <= {ori_tol:.3f})"
+                    )
+                    return True
             self.get_logger().error(f"{label}: 笛卡尔轨迹末端未收敛，判定执行失败")
             return False
         return True
@@ -1126,7 +1208,7 @@ class AutoPickPlaceNode(Node):
         1. 从当前位置逐步下降到 target.z，每步只走 waypoint_step_m
         2. 每步到达后读真实 TCP，计算 XY 偏差并修正下一目标
         3. 朝向用高权重持续校正，防止下压过程中吸盘歪斜
-        4. 若 XY 漂移超过 max_xy_drift_m，终止下压防止推走物体
+        4. TCP 横向偏差超过 max_xy_drift_m 时继续闭环修正；只有物体本体被推走才中止
         """
         cur_joints = self._current_arm_positions()
         if cur_joints is None:
@@ -1160,6 +1242,10 @@ class AutoPickPlaceNode(Node):
         q_seed = [self._joint_limit_clamp(i, float(v)) for i, v in enumerate(cur_joints)]
         command_seed = list(cur_joints)
         cartesian_dt = max(0.01, float(self.get_parameter("cartesian_cmd_period_sec").value))
+        waypoint_lead_sec = max(0.04, float(self.get_parameter("dense_waypoint_point_time_sec").value))
+        initial_top = self._current_rect_top_live(list(rect_half)) or self._current_rect_top(list(rect_half))
+        push_abort = max(0.005, float(self.get_parameter("touch_object_push_abort_m").value))
+        hard_xy_abort = max(0.10, float(max_xy_drift_m) * 2.0)
 
         for step in range(1, n_steps + 1):
             next_z = cur_z + dz_per_step
@@ -1187,10 +1273,10 @@ class AutoPickPlaceNode(Node):
                 return False
 
             cmd = self._match_joint_positions_to_reference(sol, command_seed)
-            self._publish_joint_vector(cmd)
+            self._publish_joint_vector(cmd, lead_sec_override=waypoint_lead_sec)
             q_seed = sol
             command_seed = cmd
-            time.sleep(cartesian_dt)
+            time.sleep(max(cartesian_dt, waypoint_lead_sec))
 
             if settle_sec_per_waypoint > 0:
                 time.sleep(settle_sec_per_waypoint)
@@ -1207,6 +1293,17 @@ class AutoPickPlaceNode(Node):
                 live_top = self._current_rect_top_live(list(rect_half)) or self._current_rect_top(list(rect_half))
 
                 if cup_pose is not None and live_top is not None:
+                    if initial_top is not None:
+                        push_dxy = math.hypot(
+                            float(live_top.x) - float(initial_top.x),
+                            float(live_top.y) - float(initial_top.y),
+                        )
+                        if push_dxy > push_abort:
+                            self.get_logger().error(
+                                f"{label}: 物体横向漂移 {push_dxy:.4f}m > {push_abort:.4f}m，"
+                                "停止下压以避免继续推走物体"
+                            )
+                            return False
                     cup_bottom = self._point_with_local_offset(
                         cup_pose.position,
                         cup_pose.orientation,
@@ -1216,12 +1313,17 @@ class AutoPickPlaceNode(Node):
                     dy_err = float(cup_bottom.y) - float(live_top.y)
                     lateral = math.hypot(dx_err, dy_err)
 
-                    if lateral > max_xy_drift_m:
+                    if lateral > hard_xy_abort:
                         self.get_logger().error(
-                            f"{label}: XY 漂移过大 lateral={lateral:.4f}m > {max_xy_drift_m:.4f}m，"
+                            f"{label}: TCP 横向漂移过大 lateral={lateral:.4f}m > {hard_xy_abort:.4f}m，"
                             f"终止下压防止推走物体"
                         )
                         return False
+                    if lateral > max_xy_drift_m:
+                        self.get_logger().warn(
+                            f"{label}: TCP 横向跟踪偏差 lateral={lateral:.4f}m > {max_xy_drift_m:.4f}m，"
+                            "继续闭环修正；仅在物体本体被推走时中止"
+                        )
 
                     correction_x = -dx_err * xy_correction_gain
                     correction_y = -dy_err * xy_correction_gain
@@ -1461,7 +1563,12 @@ class AutoPickPlaceNode(Node):
         if abs(p.x) < 1e-5 and abs(p.y) < 1e-5 and abs(p.z) < 1e-5:
             return
         # 过滤明显异常跳变（常见于桥接/反序列化抖动），避免把抓取点带飞。
-        if self._param_bool("use_known_rect_surface_center"):
+        rect_is_expected_to_move = (
+            self._rect_pose_can_move
+            or self._fake_attach_active
+            or self._suction_attached is True
+        )
+        if self._param_bool("use_known_rect_surface_center") and not rect_is_expected_to_move:
             known_center = self._param_xyz("known_rect_center_xyz")
             if len(known_center) == 3:
                 dxy = math.hypot(float(p.x) - float(known_center[0]), float(p.y) - float(known_center[1]))
@@ -1495,6 +1602,14 @@ class AutoPickPlaceNode(Node):
                     f"已收到 carton_box 位姿: ({p.x:.3f}, {p.y:.3f}, {p.z:.3f}) frame={msg.header.frame_id or 'N/A'}"
                 )
         self._check_ready()
+
+    def _on_world_pose_info(self, msg: TFMessage) -> None:
+        rect = extract_model_pose(msg, "rect_pickup")
+        if rect is not None:
+            self._on_rect(rect)
+        carton = extract_model_pose(msg, "carton_box")
+        if carton is not None:
+            self._on_carton(carton)
 
     def _ensure_rect_fallback(self) -> bool:
         if self._rect is not None:
@@ -1546,6 +1661,8 @@ class AutoPickPlaceNode(Node):
 
     def _on_suction_state(self, msg: Bool) -> None:
         self._suction_attached = bool(msg.data)
+        if self._suction_attached:
+            self._rect_pose_can_move = True
 
     def _wait_suction_state(self, expected: bool, timeout_sec: float) -> bool:
         t0 = time.time()
@@ -1618,6 +1735,96 @@ class AutoPickPlaceNode(Node):
             time.sleep(0.08)
         return ok
 
+    def _rect_pose_under_suction(self, half_sizes: Sequence[float]) -> Pose | None:
+        cup_pose = self._lookup_link_pose_in_base("suction_cup_link")
+        if cup_pose is None:
+            return None
+        suction_contact_offset = float(self.get_parameter("suction_contact_offset_z").value)
+        touch_dz = max(0.0, float(self.get_parameter("touch_delta_z").value))
+        half_z = max(0.001, float(half_sizes[2]) if len(half_sizes) >= 3 else 0.04)
+        cup_bottom = self._point_with_local_offset(
+            cup_pose.position,
+            cup_pose.orientation,
+            0.0,
+            0.0,
+            suction_contact_offset,
+        )
+        pose = Pose()
+        pose.position.x = cup_bottom.x
+        pose.position.y = cup_bottom.y
+        pose.position.z = max(half_z, cup_bottom.z - half_z + touch_dz)
+        pose.orientation.w = 1.0
+        return pose
+
+    def _set_rect_pose(self, pose: Pose, wait_sec: float = 0.15, log_timeout: bool = False) -> bool:
+        if not self._set_pose_client.service_is_ready():
+            return False
+        req = SetEntityPose.Request()
+        req.entity.name = "rect_pickup"
+        req.entity.type = Entity.MODEL
+        req.pose = pose
+        try:
+            fut = self._set_pose_client.call_async(req)
+        except Exception:
+            return False
+        if wait_sec <= 0.0:
+            return True
+        if not _spin_future(self, fut, wait_sec, "set_rect_pose", log_timeout=log_timeout):
+            return False
+        try:
+            res = fut.result()
+            return bool(res and res.success)
+        except Exception:
+            return False
+
+    def _fake_attach_loop(self, half_sizes: Sequence[float]) -> None:
+        hz = max(1.0, float(self.get_parameter("fake_attach_update_hz").value))
+        period = 1.0 / hz
+        while rclpy.ok() and not self._fake_attach_stop.is_set():
+            pose = self._rect_pose_under_suction(half_sizes)
+            if pose is not None:
+                self._set_rect_pose(pose, wait_sec=0.0)
+            time.sleep(period)
+
+    def _start_fake_attach(self, half_sizes: Sequence[float], reason: str) -> bool:
+        if not self._param_bool("fake_attach_set_pose_fallback"):
+            return False
+        if self._fake_attach_active:
+            return True
+        if not self._set_pose_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn(
+                f"{reason}: /world/arm_world/set_pose 服务不可用，无法启用仿真位姿跟随兜底"
+            )
+            return False
+        pose = self._rect_pose_under_suction(half_sizes)
+        if pose is not None:
+            self._set_rect_pose(pose, wait_sec=0.6)
+        self._fake_attach_stop.clear()
+        self._fake_attach_active = True
+        self._rect_pose_can_move = True
+        self._pub_visual_attached.publish(Bool(data=True))
+        self._fake_attach_thread = threading.Thread(
+            target=self._fake_attach_loop,
+            args=(list(half_sizes),),
+            daemon=True,
+        )
+        self._fake_attach_thread.start()
+        self.get_logger().warn(f"{reason}: 已启用 Gazebo SetEntityPose 仿真吸附兜底")
+        return True
+
+    def _stop_fake_attach(self, label: str) -> None:
+        if not self._fake_attach_active:
+            self._pub_visual_attached.publish(Bool(data=False))
+            return
+        self._fake_attach_active = False
+        self._fake_attach_stop.set()
+        thread = self._fake_attach_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.5)
+        self._fake_attach_thread = None
+        self._pub_visual_attached.publish(Bool(data=False))
+        self.get_logger().info(f"{label}: 已停止 SetEntityPose 仿真吸附兜底")
+
     def _ensure_detached(self, attempts: int = 8, wait_each_sec: float = 0.35) -> bool:
         """
         DetachableJoint 在 Gazebo 中可能以“已附着”状态启动。
@@ -1626,6 +1833,7 @@ class AutoPickPlaceNode(Node):
         attempts = max(1, int(attempts))
         wait_each_sec = max(0.1, float(wait_each_sec))
         saw_state_false = False
+        self._stop_fake_attach("启动 detach")
         for i in range(attempts):
             self._pub_detach.publish(Empty())
             if self._wait_suction_state(False, wait_each_sec):
@@ -1809,7 +2017,14 @@ class AutoPickPlaceNode(Node):
         obj_half_z = float(rect_half[2])
         margin = float(self.get_parameter("arm_collision_margin").value)
         link_radii = list(self.get_parameter("arm_collision_link_radii").value)
-        link_names = ["shoulder_link", "upperarm_link", "forearm_link", "wrist_1_link", "wrist_2_link"]
+        link_names = [
+            "shoulder_link",
+            "upperarm_link",
+            "forearm_link",
+            "wrist_1_link",
+            "wrist_2_link",
+            "wrist_3_link",
+        ]
         suction_offset_z = float(self.get_parameter("suction_contact_offset_z").value)
         cup_pose = self._lookup_link_pose_in_base("suction_cup_link")
         for idx, link_name in enumerate(link_names):
@@ -2450,7 +2665,7 @@ class AutoPickPlaceNode(Node):
             return len(names) - 1
 
         i_rect = _ensure_name("scene_rect_pickup")
-        for ee_link in ("suction_cup_link", "wrist_3_link"):
+        for ee_link in ("suction_cup_link",):
             i_ee = _ensure_name(ee_link)
             matrix[i_ee][i_rect] = bool(allow)
             matrix[i_rect][i_ee] = bool(allow)
@@ -2476,7 +2691,7 @@ class AutoPickPlaceNode(Node):
             return False
         self.get_logger().info(
             "抓取接触 ACM 已更新: "
-            f"[suction_cup_link, wrist_3_link] ↔ scene_rect_pickup allow={allow}"
+            f"[suction_cup_link] ↔ scene_rect_pickup allow={allow}"
         )
         return True
 
@@ -2541,7 +2756,7 @@ class AutoPickPlaceNode(Node):
         self.get_logger().error(f"{label}: MoveIt 错误码 {err}")
         return False
 
-    def _build_pose_goal(self, target: Point, orientation: Quaternion) -> MoveGroup.Goal:
+    def _build_pose_goal(self, target: Point, orientation: Quaternion, label: str = "") -> MoveGroup.Goal:
         goal = MoveGroup.Goal()
         goal.planning_options.plan_only = False
         req = goal.request
@@ -2587,10 +2802,41 @@ class AutoPickPlaceNode(Node):
         c = Constraints()
         c.position_constraints = [pc]
         c.orientation_constraints = [oc]
+        if self._pick_pose_guard_active(label):
+            c.joint_constraints = self._pick_pose_joint_constraints()
         req.goal_constraints = [c]
         req.start_state = RobotState()
         req.start_state.is_diff = True
         return goal
+
+    def _range_joint_constraint(
+        self, joint_name: str, lower: float, upper: float, weight: float = 0.8
+    ) -> JointConstraint:
+        center = 0.5 * (float(lower) + float(upper))
+        jc = JointConstraint()
+        jc.joint_name = joint_name
+        jc.position = center
+        jc.tolerance_below = max(0.001, center - float(lower))
+        jc.tolerance_above = max(0.001, float(upper) - center)
+        jc.weight = float(weight)
+        return jc
+
+    def _pick_pose_joint_constraints(self) -> list[JointConstraint]:
+        j2_min = float(self.get_parameter("pick_pose_guard_joint2_min").value)
+        j2_max = float(self.get_parameter("pick_pose_guard_joint2_max").value)
+        j3_min = float(self.get_parameter("pick_pose_guard_joint3_min").value)
+        j3_max = float(self.get_parameter("pick_pose_guard_joint3_max").value)
+        j5_min = float(self.get_parameter("pick_pose_guard_joint5_min").value)
+        j5_max = float(self.get_parameter("pick_pose_guard_joint5_max").value)
+        j4_abs_max = float(self.get_parameter("pick_pose_guard_joint4_abs_max").value)
+        j6_abs_max = float(self.get_parameter("pick_pose_guard_joint6_abs_max").value)
+        return [
+            self._range_joint_constraint("shoulder_lift_joint", j2_min, j2_max),
+            self._range_joint_constraint("elbow_joint", j3_min, j3_max),
+            self._range_joint_constraint("wrist_1_joint", -j4_abs_max, j4_abs_max),
+            self._range_joint_constraint("wrist_2_joint", j5_min, j5_max),
+            self._range_joint_constraint("wrist_3_joint", -j6_abs_max, j6_abs_max),
+        ]
 
     def _current_motion_scales(self) -> tuple[float, float]:
         if self._motion_profile == "far":
@@ -2636,7 +2882,7 @@ class AutoPickPlaceNode(Node):
         if not self._action.wait_for_server(timeout_sec=60.0):
             self.get_logger().error("move_action 不可用")
             return False
-        goal = self._build_pose_goal(target, orientation)
+        goal = self._build_pose_goal(target, orientation, label)
         self.get_logger().info(
             f"MoveGroup Pose: {label} target=({target.x:.3f},{target.y:.3f},{target.z:.3f})"
         )
@@ -2733,11 +2979,7 @@ class AutoPickPlaceNode(Node):
         return False
 
     def _pick_pose_guard_ok(self, label: str) -> bool:
-        if not self._param_bool("pick_pose_guard_enabled"):
-            return True
-        # 仅在抓取关键阶段启用，避免影响放置阶段和常规运动。
-        guarded_tokens = ("pre_pick", "approach", "pick_", "touch", "realign")
-        if not any(token in label for token in guarded_tokens):
+        if not self._pick_pose_guard_active(label):
             return True
         joints = self._current_arm_positions()
         if joints is None or len(joints) != 6:
@@ -2774,6 +3016,13 @@ class AutoPickPlaceNode(Node):
                 f"j6={j6:.3f}|<= {j6_abs_max:.2f}"
             )
         return ok
+
+    def _pick_pose_guard_active(self, label: str) -> bool:
+        if not self._param_bool("pick_pose_guard_enabled"):
+            return False
+        # 仅在抓取关键阶段启用，避免影响放置阶段和常规运动。
+        guarded_tokens = ("pre_pick", "approach", "pick_", "touch", "realign")
+        return any(token in label for token in guarded_tokens)
 
     def _move_target_with_fallback(
         self,
@@ -3861,7 +4110,10 @@ class AutoPickPlaceNode(Node):
         pick_world_yaw = math.atan2(top.y, top.x)
         place_world_yaw = math.atan2(place_pt.y, place_pt.x)
         yaw_offset = float(self.get_parameter("joint1_world_yaw_offset_rad").value)
-        base_pick_yaw = _wrap_to_pi(pick_world_yaw + yaw_offset)
+        if start_pose_cmd is not None and self._param_bool("pick_yaw_follow_start_face"):
+            base_pick_yaw = _wrap_to_pi(float(start_pose_cmd[0]))
+        else:
+            base_pick_yaw = _wrap_to_pi(pick_world_yaw + yaw_offset)
         base_place_yaw = _wrap_to_pi(place_world_yaw + yaw_offset)
         yaw_delta_set = [0.0, 0.06, -0.06]
         pick_yaw_set = [_wrap_to_pi(base_pick_yaw + d) for d in yaw_delta_set]
@@ -4067,7 +4319,6 @@ class AutoPickPlaceNode(Node):
 
         use_dense = (
             self._param_bool("hybrid_moveit_pregrasp")
-            and not self._param_bool("use_compute_ik")
             and self._param_bool("dense_waypoint_descent_enabled")
         )
         if use_dense:
@@ -4093,14 +4344,13 @@ class AutoPickPlaceNode(Node):
                 max_xy_drift_m=dense_max_drift,
             )
             if not dense_ok:
-                self.get_logger().warn("密途径点下压失败，回退到常规笛卡尔下压")
-                if not self._move_target_with_fallback(
-                    touch, pick_touch_orientations, mode="pick", label="pick_touch_fallback"
-                ):
-                    if pick_contact_collision_relaxed:
-                        self._set_pick_contact_collision_allowed(False)
-                    self.get_logger().error("pick_touch 失败（密途径点 + 常规均失败）")
-                    return
+                if pick_contact_collision_relaxed:
+                    self._set_pick_contact_collision_allowed(False)
+                self.get_logger().error(
+                    "pick_touch 失败：密途径点下压检测到碰撞/横向漂移，"
+                    "为避免继续推走物体，已禁止回退到常规下压"
+                )
+                return
         else:
             self._set_motion_profile("near")
             if not self._run_stage(
@@ -4141,32 +4391,63 @@ class AutoPickPlaceNode(Node):
         time.sleep(pre_attach_settle)
         attach_wait_sec = max(0.5, float(self.get_parameter("suction_attach_wait_sec").value))
         self._suction_attached = None
+        gz_attach_sent = False
+        # 同时通过 ROS 和 Gazebo CLI 双通道发送 attach 指令，确保 DetachableJoint 可靠接收
         self._publish_attach_burst()
+        if self._attach_via_gz_cli(repeats=6):
+            gz_attach_sent = True
+            self.get_logger().info(f"已下发 {self._gz_bin} attach 指令（双通道并行）")
         if not self._wait_suction_state(True, attach_wait_sec):
-            self.get_logger().warn("首次 attach 未确认，尝试二次下压重吸")
-            retry_touch = Point(x=touch.x, y=touch.y, z=touch.z - 0.003)
-            if self._move_target_with_fallback(
-                retry_touch, pick_touch_orientations, mode="pick", label="pick_touch_retry"
-            ):
-                time.sleep(0.4)
-            if not self._suction_bottom_alignment_ok(half, strict=False):
-                if pick_contact_collision_relaxed:
-                    self._set_pick_contact_collision_allowed(False)
-                self.get_logger().error("二次吸附前检查失败：仅允许吸盘底面吸附")
-                return
-            self._suction_attached = None
-            self._publish_attach_burst()
-            if not self._wait_suction_state(True, attach_wait_sec):
-                if self._attach_via_gz_cli(repeats=8):
-                    self.get_logger().warn(f"ROS attach 未确认，已下发 {self._gz_bin} attach 兜底指令")
-                    self._wait_suction_state(True, 0.8)
-                else:
-                    self.get_logger().warn("未收到 /cs612/suction/state=true，改用“抬升后物体是否上移”判据继续")
-        time.sleep(0.3)
+            if self._suction_bottom_alignment_ok(half, strict=False):
+                self.get_logger().warn(
+                    "未收到 state=true，但 Gazebo 已接收 attach 且吸盘几何合格；"
+                    "额外发送 Gazebo CLI attach 并延长等待"
+                )
+                if not gz_attach_sent:
+                    self._attach_via_gz_cli(repeats=12)
+                    gz_attach_sent = True
+                if not self._wait_suction_state(True, 2.0):
+                    self.get_logger().warn(
+                        "状态仍未确认，启用仿真吸附兜底以保证物体跟随"
+                    )
+                    self._start_fake_attach(half, "DetachableJoint attach 状态未确认")
+            else:
+                self.get_logger().warn("首次 attach 未确认且几何接触不足，尝试二次下压重吸")
+                retry_touch = Point(x=touch.x, y=touch.y, z=touch.z - 0.003)
+                if self._move_target_with_fallback(
+                    retry_touch, pick_touch_orientations, mode="pick", label="pick_touch_retry"
+                ):
+                    time.sleep(0.4)
+                if not self._suction_bottom_alignment_ok(half, strict=False):
+                    if pick_contact_collision_relaxed:
+                        self._set_pick_contact_collision_allowed(False)
+                    self.get_logger().error("二次吸附前检查失败：仅允许吸盘底面吸附")
+                    return
+                self._suction_attached = None
+                self._publish_attach_burst()
+                self._attach_via_gz_cli(repeats=8)
+                gz_attach_sent = True
+                if not self._wait_suction_state(True, attach_wait_sec):
+                    if not self._wait_suction_state(True, 1.5):
+                        self._start_fake_attach(half, "重吸附 DetachableJoint 未确认")
+        if (
+            self._param_bool("allow_unverified_sim_attach")
+            and not self._fake_attach_active
+            and (self._suction_attached is not True or not self._logged_rect)
+        ):
+            self._start_fake_attach(half, "吸附状态或物体实时位姿未可靠确认")
+        # 延长稳定等待，确保 DetachableJoint 在物理引擎中完全约束后再抬升
+        attach_stabilize = max(1.0, float(self.get_parameter("pre_attach_settle_sec").value) + 0.5)
+        time.sleep(attach_stabilize)
 
         probe_ok, _ = self._probe_pickup_follow(
             touch, pick_touch_orientations[0], label="pick_probe_lift"
         )
+        if (not probe_ok) and (gz_attach_sent or self._fake_attach_active) and self._param_bool("allow_unverified_sim_attach"):
+            self.get_logger().warn(
+                "Gazebo/SetEntityPose 吸附兜底已启用但状态/探针未确认；跳过重接触，直接执行主抬升验证。"
+            )
+            probe_ok = True
         if not probe_ok:
             self.get_logger().warn("探测抬升未验证吸附成功，执行一次重接触重吸附")
             if not self._move_target_with_fallback(
@@ -4174,6 +4455,7 @@ class AutoPickPlaceNode(Node):
             ):
                 if pick_contact_collision_relaxed:
                     self._set_pick_contact_collision_allowed(False)
+                self._stop_fake_attach("重接触失败")
                 self._pub_detach.publish(Empty())
                 self.get_logger().error("重接触失败，停止本轮抓取")
                 return
@@ -4181,22 +4463,26 @@ class AutoPickPlaceNode(Node):
             if not self._suction_bottom_alignment_ok(half, strict=False):
                 if pick_contact_collision_relaxed:
                     self._set_pick_contact_collision_allowed(False)
+                self._stop_fake_attach("重接触几何失败")
                 self._pub_detach.publish(Empty())
                 self.get_logger().error("重接触后几何检查失败，停止本轮抓取")
                 return
             self._suction_attached = None
             self._publish_attach_burst()
+            self._attach_via_gz_cli(repeats=10)
+            gz_attach_sent = True
             if not self._wait_suction_state(True, attach_wait_sec):
-                if self._attach_via_gz_cli(repeats=8):
-                    self.get_logger().warn(f"重吸附 ROS 未确认，已下发 {self._gz_bin} attach 兜底指令")
-                    self._wait_suction_state(True, 0.8)
-            time.sleep(0.3)
+                self.get_logger().warn(f"重吸附状态未确认，已下发 {self._gz_bin} attach 兜底指令")
+                if not self._wait_suction_state(True, 1.5):
+                    self._start_fake_attach(half, "重吸附 DetachableJoint 未确认")
+            time.sleep(1.0)
             probe_ok, _ = self._probe_pickup_follow(
                 touch, pick_touch_orientations[0], label="pick_probe_lift_retry"
             )
             if not probe_ok:
                 if pick_contact_collision_relaxed:
                     self._set_pick_contact_collision_allowed(False)
+                self._stop_fake_attach("吸附验证失败")
                 self._pub_detach.publish(Empty())
                 self.get_logger().error("吸附验证失败：探测抬升时物体未跟随，已停止本轮抓取")
                 return
@@ -4211,6 +4497,7 @@ class AutoPickPlaceNode(Node):
         ):
             if pick_contact_collision_relaxed:
                 self._set_pick_contact_collision_allowed(False)
+            self._stop_fake_attach("抬升失败")
             self._pub_detach.publish(Empty())
             self.get_logger().error("抬升失败，已释放吸附")
             return
@@ -4226,15 +4513,21 @@ class AutoPickPlaceNode(Node):
             and rect_center_z_after_lift is not None
         )
         if (
-            has_live_lift_pose
+            not self._fake_attach_active
+            and has_live_lift_pose
             and rect_center_z_after_lift < rect_center_z_before_attach + 0.015
         ):
+            self._stop_fake_attach("抬升后物体未跟随")
             self._pub_detach.publish(Empty())
             self.get_logger().error(
                 "吸附失败：抬升后物体未跟随上移 "
                 f"(before={rect_center_z_before_attach:.3f}, after={rect_center_z_after_lift:.3f})"
             )
             return
+        if self._fake_attach_active and has_live_lift_pose:
+            self.get_logger().info(
+                "SetEntityPose 仿真吸附兜底已启用，物体位姿由吸盘位姿驱动。"
+            )
         if not has_live_lift_pose and self._param_bool("allow_unverified_sim_attach"):
             self.get_logger().warn(
                 "未收到实时 rect_pickup 位姿，跳过抬升后物体跟随高度验证（仿真 attach 兜底模式）"
@@ -4262,6 +4555,7 @@ class AutoPickPlaceNode(Node):
             label="place_above",
         )
         if place_above_used is None:
+            self._stop_fake_attach("place_above 失败")
             self._pub_detach.publish(Empty())
             self.get_logger().error("place_above 失败（已尝试提高高度与 Pose 回退）")
             return
@@ -4283,6 +4577,7 @@ class AutoPickPlaceNode(Node):
 
         self.get_logger().info("释放 detach")
         self._suction_attached = None
+        self._stop_fake_attach("place_release")
         self._pub_detach.publish(Empty())
         self._wait_suction_state(False, 1.0)
         time.sleep(0.2)
@@ -4342,7 +4637,15 @@ def main() -> None:
     node = AutoPickPlaceNode()
     executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
-    exec_thread = threading.Thread(target=executor.spin, daemon=True)
+
+    def _spin_executor() -> None:
+        try:
+            executor.spin()
+        except Exception:
+            if rclpy.ok():
+                raise
+
+    exec_thread = threading.Thread(target=_spin_executor, daemon=True)
     exec_thread.start()
     try:
         time.sleep(0.2)
@@ -4354,17 +4657,25 @@ def main() -> None:
         pass
     finally:
         try:
+            node._stop_fake_attach("节点关闭")
+        except BaseException:
+            pass
+        try:
             executor.shutdown()
-        except Exception:
+        except BaseException:
+            pass
+        try:
+            exec_thread.join(timeout=1.0)
+        except BaseException:
             pass
         try:
             node.destroy_node()
-        except Exception:
+        except BaseException:
             pass
         try:
             if rclpy.ok():
                 rclpy.shutdown()
-        except Exception:
+        except BaseException:
             pass
 
 

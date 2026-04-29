@@ -1,12 +1,15 @@
 """CS612 Gazebo + MoveIt bringup using the official Elite CS ROS 2 stack."""
+import json
 import subprocess
+import time
 from pathlib import Path
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, OpaqueFunction, SetEnvironmentVariable, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, SetEnvironmentVariable, TimerAction
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit, OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -21,6 +24,26 @@ _ARM_JOINTS = [
     "wrist_2_joint",
     "wrist_3_joint",
 ]
+_DEBUG_LOG_PATH = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-cfd510.log")
+_DEBUG_SESSION_ID = "cfd510"
+
+
+def _debug_log(location: str, message: str, hypothesis_id: str, data: dict) -> None:
+    payload = {
+        "sessionId": _DEBUG_SESSION_ID,
+        "runId": "pre-fix",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        _DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
 
 
 def _load_yaml(path: Path) -> dict:
@@ -54,6 +77,7 @@ def _launch_setup(context, *args, **kwargs):
     launch_rviz = LaunchConfiguration("launch_rviz")
     auto_pick = LaunchConfiguration("auto_pick")
     launch_gz_gui = LaunchConfiguration("launch_gz_gui")
+    rviz_config_arg = LaunchConfiguration("rviz_config")
     helper_modules = {
         "cs612_world_markers": "cs612_moveit_config.world_markers",
         "cs612_planning_scene_spawner": "cs612_moveit_config.planning_scene_spawner",
@@ -84,6 +108,24 @@ def _launch_setup(context, *args, **kwargs):
 
     gz_gui_enabled = launch_gz_gui.perform(context).strip().lower() in ("1", "true", "yes", "on")
     gz_flags = "-r -v 4" if gz_gui_enabled else "-r -s -v 4"
+    rviz_config_value = rviz_config_arg.perform(context).strip()
+    rviz_config_file = Path(rviz_config_value)
+    if not rviz_config_file.is_absolute():
+        rviz_config_file = moveit_config_dir / "config" / rviz_config_value
+    # #region agent log
+    _debug_log(
+        "bringup.launch.py:_launch_setup",
+        "launch_setup_values",
+        "H4",
+        {
+            "launch_rviz": launch_rviz.perform(context),
+            "launch_gz_gui": launch_gz_gui.perform(context),
+            "auto_pick": auto_pick.perform(context),
+            "rviz_config": str(rviz_config_file),
+            "world_file_exists": world_file.is_file(),
+        },
+    )
+    # #endregion
 
     gz_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([FindPackageShare("ros_gz_sim"), "/launch/gz_sim.launch.py"]),
@@ -131,6 +173,14 @@ def _launch_setup(context, *args, **kwargs):
         ],
         output="screen",
     )
+    gz_set_pose_bridge = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        arguments=[
+            "/world/arm_world/set_pose@ros_gz_interfaces/srv/SetEntityPose",
+        ],
+        output="screen",
+    )
 
     move_group = Node(
         package="moveit_ros_move_group",
@@ -167,7 +217,7 @@ def _launch_setup(context, *args, **kwargs):
         executable="rviz2",
         name="rviz2",
         output="screen",
-        arguments=["-d", str(moveit_config_dir / "config" / "cs612.rviz")],
+        arguments=["-d", str(rviz_config_file)],
         parameters=[
             robot_description,
             robot_description_semantic,
@@ -229,14 +279,145 @@ def _launch_setup(context, *args, **kwargs):
         _startup_detach_action(7.5),
         _startup_detach_action(9.0),
     ]
+    # #region agent log
+    _debug_log(
+        "bringup.launch.py:_launch_setup",
+        "actions_registered",
+        "H2",
+        {
+            "helpers_count": len(helpers),
+            "detach_action_count": len(startup_detach_actions),
+            "arm_joint_count": len(_ARM_JOINTS),
+        },
+    )
+    # #endregion
 
     return [
         gz_launch,
         robot_state_publisher,
         TimerAction(period=2.0, actions=[spawn_robot]),
-        TimerAction(period=4.0, actions=[joint_state_broadcaster, joint_trajectory_controller, gz_bridge]),
+        TimerAction(period=4.0, actions=[joint_state_broadcaster, joint_trajectory_controller, gz_bridge, gz_set_pose_bridge]),
         TimerAction(period=5.0, actions=[move_group, *helpers, rviz]),
         TimerAction(period=25.0, actions=[auto_pick_node], condition=IfCondition(auto_pick)),
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=move_group,
+                on_exit=[
+                    OpaqueFunction(
+                        function=lambda context: (
+                            # #region agent log
+                            _debug_log(
+                                "bringup.launch.py:OnProcessExit(move_group)",
+                                "process_exit",
+                                "H2",
+                                {"process": "move_group"},
+                            ),
+                            # #endregion
+                            []
+                        )[1]
+                    )
+                ],
+            )
+        ),
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=auto_pick_node,
+                on_exit=[
+                    OpaqueFunction(
+                        function=lambda context: (
+                            # #region agent log
+                            _debug_log(
+                                "bringup.launch.py:OnProcessExit(cs612_auto_pick_place)",
+                                "process_exit",
+                                "H6",
+                                {"process": "cs612_auto_pick_place"},
+                            ),
+                            # #endregion
+                            []
+                        )[1]
+                    )
+                ],
+            )
+        ),
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=rviz,
+                on_exit=[
+                    OpaqueFunction(
+                        function=lambda context: (
+                            # #region agent log
+                            _debug_log(
+                                "bringup.launch.py:OnProcessExit(rviz2)",
+                                "process_exit",
+                                "H2",
+                                {"process": "rviz2"},
+                            ),
+                            # #endregion
+                            []
+                        )[1]
+                    )
+                ],
+            )
+        ),
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=robot_state_publisher,
+                on_exit=[
+                    OpaqueFunction(
+                        function=lambda context: (
+                            # #region agent log
+                            _debug_log(
+                                "bringup.launch.py:OnProcessExit(robot_state_publisher)",
+                                "process_exit",
+                                "H6",
+                                {"process": "robot_state_publisher"},
+                            ),
+                            # #endregion
+                            []
+                        )[1]
+                    )
+                ],
+            )
+        ),
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=gz_bridge,
+                on_exit=[
+                    OpaqueFunction(
+                        function=lambda context: (
+                            # #region agent log
+                            _debug_log(
+                                "bringup.launch.py:OnProcessExit(gz_ros2_bridge)",
+                                "process_exit",
+                                "H6",
+                                {"process": "gz_ros2_bridge"},
+                            ),
+                            # #endregion
+                            []
+                        )[1]
+                    )
+                ],
+            )
+        ),
+        RegisterEventHandler(
+            OnShutdown(
+                on_shutdown=[
+                    OpaqueFunction(
+                        function=lambda context: (
+                            # #region agent log
+                            _debug_log(
+                                "bringup.launch.py:OnShutdown",
+                                "launch_shutdown",
+                                "H2",
+                                {"reason": str(getattr(context.locals.event, "reason", "unknown"))},
+                            ),
+                            # #endregion
+                            []
+                        )[1]
+                    )
+                ]
+            )
+        ),
         *startup_detach_actions,
     ]
 
@@ -262,6 +443,7 @@ def generate_launch_description():
             DeclareLaunchArgument("launch_rviz", default_value="true"),
             DeclareLaunchArgument("auto_pick", default_value="true"),
             DeclareLaunchArgument("launch_gz_gui", default_value="false"),
+            DeclareLaunchArgument("rviz_config", default_value="cs612.rviz"),
             SetEnvironmentVariable("HOME", str(runtime_home)),
             SetEnvironmentVariable("XDG_CONFIG_HOME", str(runtime_xdg_config)),
             SetEnvironmentVariable("XDG_CACHE_HOME", str(runtime_xdg_cache)),

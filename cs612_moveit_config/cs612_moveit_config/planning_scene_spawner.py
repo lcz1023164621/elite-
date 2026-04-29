@@ -9,7 +9,9 @@ CollisionObject + PlanningScene 做法一致（参见 moveit2_tutorials 及 pymo
 """
 from __future__ import annotations
 
+import json
 import math
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -23,6 +25,31 @@ from moveit_msgs.srv import ApplyPlanningScene
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from shape_msgs.msg import SolidPrimitive
+from std_msgs.msg import Bool
+from tf2_msgs.msg import TFMessage
+
+from .gazebo_pose_sync import extract_model_pose
+
+_DEBUG_LOG_PATH = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-cfd510.log")
+_DEBUG_SESSION_ID = "cfd510"
+
+
+def _debug_log(location: str, message: str, hypothesis_id: str, data: dict) -> None:
+    payload = {
+        "sessionId": _DEBUG_SESSION_ID,
+        "runId": "pre-fix",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        _DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
 
 
 def _quat_from_rpy(roll: float, pitch: float, yaw: float) -> Quaternion:
@@ -118,6 +145,8 @@ class PlanningSceneSpawner(Node):
 
         self._rect: PoseStamped | None = None
         self._carton: PoseStamped | None = None
+        self._suction_attached = False
+        self._visual_attached = False
         self._applied_revision: int | None = None
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -134,9 +163,29 @@ class PlanningSceneSpawner(Node):
             self._on_carton,
             qos_profile_sensor_data,
         )
+        self.create_subscription(
+            TFMessage,
+            "/world/arm_world/pose/info",
+            self._on_world_pose_info,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            TFMessage,
+            "/world/arm_world/dynamic_pose/info",
+            self._on_world_pose_info,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(Bool, "/cs612/suction/state", self._on_suction_state, qos_profile_sensor_data)
+        self.create_subscription(
+            Bool,
+            "/cs612/suction/attached_visual_state",
+            self._on_visual_attached,
+            qos_profile_sensor_data,
+        )
         self._client = self.create_client(ApplyPlanningScene, "/apply_planning_scene")
         self._pending = None
         self._pending_rev: int | None = None
+        self._dbg_service_wait_logged = False
         self.declare_parameter("scene_update_quantization_m", 0.02)
         # Gazebo 中物体会因接触/推挤产生小位移；规划场景默认持续同步，避免 RViz 与 Gazebo 位置漂移。
         self.declare_parameter("continuous_scene_sync", True)
@@ -147,12 +196,46 @@ class PlanningSceneSpawner(Node):
         if abs(p.x) < 1e-5 and abs(p.y) < 1e-5 and abs(p.z) < 1e-5:
             return
         self._rect = msg
+        if not hasattr(self, "_dbg_rect_logged"):
+            self._dbg_rect_logged = True
+            # #region agent log
+            _debug_log(
+                "planning_scene_spawner.py:_on_rect",
+                "rect_pose_received",
+                "H1",
+                {"frame": msg.header.frame_id or "", "x": float(p.x), "y": float(p.y), "z": float(p.z)},
+            )
+            # #endregion
 
     def _on_carton(self, msg: PoseStamped) -> None:
         p = msg.pose.position
         if abs(p.x) < 1e-5 and abs(p.y) < 1e-5 and abs(p.z) < 1e-5:
             return
         self._carton = msg
+        if not hasattr(self, "_dbg_carton_logged"):
+            self._dbg_carton_logged = True
+            # #region agent log
+            _debug_log(
+                "planning_scene_spawner.py:_on_carton",
+                "carton_pose_received",
+                "H1",
+                {"frame": msg.header.frame_id or "", "x": float(p.x), "y": float(p.y), "z": float(p.z)},
+            )
+            # #endregion
+
+    def _on_world_pose_info(self, msg: TFMessage) -> None:
+        rect = extract_model_pose(msg, "rect_pickup")
+        if rect is not None:
+            self._on_rect(rect)
+        carton = extract_model_pose(msg, "carton_box")
+        if carton is not None:
+            self._on_carton(carton)
+
+    def _on_suction_state(self, msg: Bool) -> None:
+        self._suction_attached = bool(msg.data)
+
+    def _on_visual_attached(self, msg: Bool) -> None:
+        self._visual_attached = bool(msg.data)
 
     def _effective_rect(self) -> PoseStamped:
         ps = self._rect if self._rect is not None else self._rect_fallback
@@ -203,8 +286,9 @@ class PlanningSceneSpawner(Node):
                 Quaternion(x=0.0, y=0.0, z=0.0, w=1.0),
                 [self._ground_size[0], self._ground_size[1], self._ground_thickness],
             ),
-            _make_box("scene_rect_pickup", Point(x=rp.x, y=rp.y, z=rp.z), rq, [sx, sy, sz]),
         ]
+        if not (self._suction_attached or self._visual_attached):
+            objects.append(_make_box("scene_rect_pickup", Point(x=rp.x, y=rp.y, z=rp.z), rq, [sx, sy, sz]))
 
         bx, by, bz = self._carton_outer
         wt = self._carton_wall_t
@@ -263,6 +347,8 @@ class PlanningSceneSpawner(Node):
                 round(c.x / q),
                 round(c.y / q),
                 round(c.z / q),
+                self._suction_attached,
+                self._visual_attached,
             )
         )
 
@@ -291,7 +377,18 @@ class PlanningSceneSpawner(Node):
             return
 
         if not self._client.wait_for_service(timeout_sec=0.0):
+            if not self._dbg_service_wait_logged:
+                self._dbg_service_wait_logged = True
+                # #region agent log
+                _debug_log(
+                    "planning_scene_spawner.py:_tick",
+                    "apply_service_not_ready",
+                    "H3",
+                    {},
+                )
+                # #endregion
             return
+        self._dbg_service_wait_logged = False
         rev = self._stable_rev()
         if self._applied_revision is not None and self._applied_revision == rev:
             return
@@ -303,6 +400,20 @@ class PlanningSceneSpawner(Node):
         req.scene = scene
         self._pending_rev = rev
         self._pending = self._client.call_async(req)
+        # #region agent log
+        _debug_log(
+            "planning_scene_spawner.py:_tick",
+            "apply_scene_sent",
+            "H1",
+            {
+                "rev": int(rev),
+                "object_count": len(scene.world.collision_objects),
+                "has_rect_pose": self._rect is not None,
+                "has_carton_pose": self._carton is not None,
+                "attached": bool(self._suction_attached or self._visual_attached),
+            },
+        )
+        # #endregion
 
 
 def main() -> None:
@@ -312,14 +423,19 @@ def main() -> None:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except RuntimeError as exc:
+        # During Ctrl-C shutdown, the Gazebo Pose_V bridge may invalidate an in-flight
+        # TFMessage conversion. Do not report that as a node failure.
+        if rclpy.ok() and "Unable to convert call argument" not in str(exc):
+            raise
     finally:
         try:
             node.destroy_node()
-        except Exception:
+        except BaseException:
             pass
         try:
             rclpy.shutdown()
-        except Exception:
+        except BaseException:
             pass
 
 

@@ -2096,85 +2096,6 @@ class AutoPickPlaceNode(Node):
             self.get_logger().warn(f"{label}: 验证结束 lateral={final_lateral:.4f}m, xy={'OK' if final_lateral <= lateral_max else 'FAIL'}")
         return final_lateral <= lateral_max * 1.5 if cup_pose is not None else False
 
-            xy_ok = lateral_err <= lateral_max
-            z_ok = z_err <= z_max
-            orient_ok = down_cos >= min_cos
-
-            if xy_ok and z_ok and orient_ok:
-                self.get_logger().info(f"{label}[{attempt}]: approach 验证通过")
-                return True
-            # 允许中心有一定偏差：只要朝向正确且横向误差在“可吸附范围”内，就先执行抓取。
-            if lateral_err <= relaxed_lateral_tol and orient_ok and z_err <= 0.10:
-                self.get_logger().info(
-                    f"{label}[{attempt}]: 采用宽松判据通过（lateral={lateral_err:.4f} <= {relaxed_lateral_tol:.4f}）"
-                )
-                return True
-
-            self.get_logger().warn(
-                f"{label}[{attempt}]: approach 未通过 "
-                f"xy={'OK' if xy_ok else 'FAIL'} z={'OK' if z_ok else 'FAIL'} "
-                f"orient={'OK' if orient_ok else 'FAIL'}"
-            )
-
-            # 护栏：若当前关节状态命中坏姿态，立刻终止 approach 校正，避免一路把姿态走偏。
-            if not self._pick_pose_guard_ok(label):
-                self.get_logger().warn(
-                    f"{label}[{attempt}]: 当前关节命中抓取护栏，停止 approach 校正"
-                )
-                return False
-
-            # 若 z 误差连续不下降，停止 approach 校正（避免反复走坏姿态）。
-            if prev_z_err is not None and z_err >= prev_z_err - 0.0005:
-                no_improve_count += 1
-                if no_improve_count >= 2:
-                    self.get_logger().warn(
-                        f"{label}[{attempt}]: z_err 连续不收敛，approach 校正终止；"
-                        f"将由后续笛卡尔下压完成最终贴合"
-                    )
-                    # xy/朝向若已 OK，则视为 approach 阶段已可接受，下压阶段做最终贴合
-                    if xy_ok and orient_ok:
-                        return True
-                    return False
-            else:
-                no_improve_count = 0
-            prev_z_err = z_err
-
-            step_norm = math.hypot(dx, dy)
-            if step_norm > max_fix_step and step_norm > 1e-9:
-                scale = max_fix_step / step_norm
-                dx *= scale
-                dy *= scale
-            corrected_approach = Point(
-                x=current_approach.x - dx,
-                y=current_approach.y - dy,
-                z=current_approach.z,
-            )
-            moved = self._move_target_with_moveit_pose(
-                corrected_approach, orientations, f"{label}_fix[{attempt}]"
-            )
-            if not moved:
-                moved = self._move_cartesian_direct(
-                    corrected_approach,
-                    target_orient,
-                    mode="pick",
-                    label=f"{label}_fix_cart[{attempt}]",
-                    orientation_weight_override=max(1.0, float(self.get_parameter("orientation_correction_weight").value)),
-                )
-            if moved:
-                time.sleep(0.8)
-                current_approach = Point(x=corrected_approach.x, y=corrected_approach.y, z=corrected_approach.z)
-            else:
-                self.get_logger().warn(f"{label}[{attempt}]: 校正运动失败")
-
-        cup_pose = self._lookup_link_pose_in_base("suction_cup_link")
-        if cup_pose is not None:
-            cup_bottom_final = self._point_with_local_offset(
-                cup_pose.position, cup_pose.orientation, 0.0, 0.0, suction_contact_offset
-            )
-            final_lateral = math.hypot(cup_bottom_final.x - top.x, cup_bottom_final.y - top.y)
-            self.get_logger().warn(f"{label}: 验证结束 lateral={final_lateral:.4f}m")
-        return False
-
     def _refine_xy_alignment(
         self,
         top: Point,
@@ -3141,7 +3062,7 @@ class AutoPickPlaceNode(Node):
 
     def _reject_ik_solution(self, positions: Sequence[float], target: Point, mode: str) -> bool:
         """仅剔除明显越限/奇异解，避免把可行抓取解误过滤掉。"""
-        desired_j1 = self._desired_j1_for_target(target)
+        desired_j1 = self._desired_joint1_for_target(target)
         joint1_limit_deg = 150.0 if mode == "pick" else 150.0
         j1_err = _angle_distance(float(positions[0]), desired_j1)
         if j1_err > math.radians(joint1_limit_deg):

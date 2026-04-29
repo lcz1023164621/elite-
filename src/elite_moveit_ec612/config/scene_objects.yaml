@@ -1,0 +1,26 @@
+# 与 worlds/my_world.sdf 中模型一致；机械臂 base 在原点且未移动时，可用 base_link 作为参考系。
+# 若修改 world 里 rect_pickup / carton_box / CS612_arm 的 pose，请同步改此处。
+# 当前点位按"正前方舒适半径抓取 + 右前方放箱"布置，确保顶向下 IK 稳定收敛。
+reference_frame: base_link
+
+rect_pickup:
+  # model pose 为 link 中心；方块尺寸见 world（与 my_world.sdf 同步）
+  # 选在 base 正前方约 0.56m，给预抓取对位和竖直下压留出更稳定的姿态空间。
+  center_xyz: [0.56, 0.0, 0.03]
+  size_xyz: [0.14, 0.10, 0.06]
+  # 顶面几何中心（世界/base_link）
+  # top_center = center + [0, 0, +size_z/2]
+  # 与几何顶面中心保持一致；运行时抓取点会按 center+size 实时重算。
+  suction_pick_center_xyz: [0.56, 0.0, 0.06]
+  suction_pick_tolerance_m: 0.01
+  approach_clearance: 0.18
+
+carton_box:
+  # 与待抓物体进一步拉开，同时保持在可达区且接近放置甜区。
+  model_pose_xyz: [0.88, -0.34, 0.0]
+  # 底板顶面近似高度（link 原点在地面上，底板 z=0.003, 半高 0.003 → 顶面 z≈0.006）
+  floor_top_z: 0.006
+  # 内腔中心 XY 与模型原点一致（箱体关于原点对称）
+  center_xy: [0.88, -0.34]
+  # 放置时 TCP 目标：内腔上方（避免撞壁，需根据吸盘长度微调）
+  place_height_above_floor: 0.12

@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from rclpy.action import ActionClient
+
+from geometry_msgs.msg import Pose
+from moveit_msgs.action import MoveGroup
+from moveit_msgs.msg import (
+    MotionPlanRequest,
+    Constraints,
+    PositionConstraint,
+    JointConstraint,
+    BoundingVolume,
+)
+from shape_msgs.msg import SolidPrimitive
+
+from scene_params import get_scene
+
+
+class Tool0SafeTester(Node):
+    def __init__(self):
+        super().__init__("test_tool0_points_safe")
+
+        self.client = ActionClient(self, MoveGroup, "/move_action")
+
+        self.group_name = "cs_manipulator"
+        self.base_frame = "base_link"
+        self.ee_link = "tool0"
+
+        self.joint_names = [
+            "shoulder_pan_joint",
+            "shoulder_lift_joint",
+            "elbow_joint",
+            "wrist_1_joint",
+            "wrist_2_joint",
+            "wrist_3_joint",
+        ]
+
+        # SRDF 里的 up 姿态
+        self.up_positions = [
+            0.0,
+            -1.5707,
+            0.0,
+            -1.5707,
+            0.0,
+            0.0,
+        ]
+
+    def wait_for_moveit(self):
+        self.get_logger().info("等待 MoveIt move_action...")
+        self.client.wait_for_server()
+        self.get_logger().info("MoveIt move_action 已连接")
+
+    def send_move_group_goal(self, req, name):
+        goal_msg = MoveGroup.Goal()
+        goal_msg.request = req
+
+        goal_msg.planning_options.plan_only = False
+        goal_msg.planning_options.look_around = False
+        goal_msg.planning_options.replan = True
+        goal_msg.planning_options.replan_attempts = 3
+
+        future = self.client.send_goal_async(goal_msg)
+        rclpy.spin_until_future_complete(self, future)
+
+        goal_handle = future.result()
+
+        if goal_handle is None:
+            self.get_logger().error(f"{name} 目标发送失败")
+            return False
+
+        if not goal_handle.accepted:
+            self.get_logger().error(f"{name} 目标被 MoveIt 拒绝")
+            return False
+
+        self.get_logger().info(f"{name} 目标已接受，等待执行结果...")
+
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future)
+
+        result = result_future.result().result
+
+        if result.error_code.val == 1:
+            self.get_logger().info(f"{name} 移动成功")
+            return True
+
+        self.get_logger().error(
+            f"{name} 移动失败，error_code={result.error_code.val}"
+        )
+        return False
+
+    def move_to_up(self):
+        self.get_logger().info("先移动到 up 关节姿态，避免从异常姿态开始规划...")
+
+        req = MotionPlanRequest()
+        req.group_name = self.group_name
+        req.num_planning_attempts = 20
+        req.allowed_planning_time = 10.0
+        req.max_velocity_scaling_factor = 0.08
+        req.max_acceleration_scaling_factor = 0.08
+        req.start_state.is_diff = True
+
+        constraints = Constraints()
+        constraints.name = "joint_up"
+
+        for joint_name, joint_pos in zip(self.joint_names, self.up_positions):
+            jc = JointConstraint()
+            jc.joint_name = joint_name
+            jc.position = float(joint_pos)
+            jc.tolerance_above = 0.02
+            jc.tolerance_below = 0.02
+            jc.weight = 1.0
+            constraints.joint_constraints.append(jc)
+
+        req.goal_constraints.append(constraints)
+
+        return self.send_move_group_goal(req, "move_to_up")
+
+    def move_to_position(self, x, y, z, name, goal_tolerance):
+        self.get_logger().info(
+            f"准备移动到 {name}: "
+            f"x={x:.3f}, y={y:.3f}, z={z:.3f}, "
+            f"goal_tolerance={goal_tolerance:.3f}"
+        )
+
+        req = MotionPlanRequest()
+        req.group_name = self.group_name
+        req.num_planning_attempts = 30
+        req.allowed_planning_time = 12.0
+        req.max_velocity_scaling_factor = 0.06
+        req.max_acceleration_scaling_factor = 0.06
+        req.start_state.is_diff = True
+
+        constraints = Constraints()
+        constraints.name = name
+
+        pos_constraint = PositionConstraint()
+        pos_constraint.header.frame_id = self.base_frame
+        pos_constraint.link_name = self.ee_link
+        pos_constraint.target_point_offset.x = 0.0
+        pos_constraint.target_point_offset.y = 0.0
+        pos_constraint.target_point_offset.z = 0.0
+
+        sphere = SolidPrimitive()
+        sphere.type = SolidPrimitive.SPHERE
+
+        # 先放宽一点，避免过早因为 2cm 精度失败
+        sphere.dimensions = [float(max(goal_tolerance, 0.04))]
+
+        target_pose = Pose()
+        target_pose.position.x = float(x)
+        target_pose.position.y = float(y)
+        target_pose.position.z = float(z)
+        target_pose.orientation.w = 1.0
+
+        bv = BoundingVolume()
+        bv.primitives.append(sphere)
+        bv.primitive_poses.append(target_pose)
+
+        pos_constraint.constraint_region = bv
+        pos_constraint.weight = 1.0
+
+        constraints.position_constraints.append(pos_constraint)
+        req.goal_constraints.append(constraints)
+
+        return self.send_move_group_goal(req, name)
+
+
+def main():
+    rclpy.init()
+
+    scene_cfg = get_scene()
+
+    material = scene_cfg["material_box"]
+    packing = scene_cfg["packing_box"]
+    test = scene_cfg["test"]
+
+    safe_x = test["safe_x"]
+    safe_y = test["safe_y"]
+    safe_z = max(test["safe_z"], 1.00)
+
+    above_clearance = max(test["above_clearance"], 0.60)
+    goal_tolerance = test["goal_tolerance"]
+
+    material_above_x = material["x"]
+    material_above_y = material["y"]
+    material_above_z = material["z"] + material["height"] + above_clearance
+
+    packing_above_x = packing["x"]
+    packing_above_y = packing["y"]
+    packing_above_z = packing["z"] + packing["height"] + above_clearance
+
+    node = Tool0SafeTester()
+    node.wait_for_moveit()
+
+    node.get_logger().info("============================================================")
+    node.get_logger().info("开始安全点位测试")
+    node.get_logger().info(f"安全点: x={safe_x}, y={safe_y}, z={safe_z}")
+    node.get_logger().info(
+        f"物料箱上方: x={material_above_x}, "
+        f"y={material_above_y}, z={material_above_z}"
+    )
+    node.get_logger().info(
+        f"包装箱上方: x={packing_above_x}, "
+        f"y={packing_above_y}, z={packing_above_z}"
+    )
+    node.get_logger().info("============================================================")
+
+    # 0. 先回 up，避免从倒地 / 反向姿态开始
+    if not node.move_to_up():
+        node.get_logger().error("无法移动到 up 姿态，停止后续测试。")
+        node.destroy_node()
+        rclpy.shutdown()
+        return
+
+    # 1. 高空安全点
+    if not node.move_to_position(
+        safe_x,
+        safe_y,
+        safe_z,
+        "safe_high_point_1",
+        goal_tolerance,
+    ):
+        node.destroy_node()
+        rclpy.shutdown()
+        return
+
+    # 2. 物料箱上方
+    if not node.move_to_position(
+        material_above_x,
+        material_above_y,
+        material_above_z,
+        "material_box_above_high",
+        goal_tolerance,
+    ):
+        node.move_to_position(
+            safe_x,
+            safe_y,
+            safe_z,
+            "return_safe_after_material_failed",
+            goal_tolerance,
+        )
+        node.destroy_node()
+        rclpy.shutdown()
+        return
+
+    # 3. 回安全点
+    if not node.move_to_position(
+        safe_x,
+        safe_y,
+        safe_z,
+        "safe_high_point_2",
+        goal_tolerance,
+    ):
+        node.destroy_node()
+        rclpy.shutdown()
+        return
+
+    # 4. 包装箱上方
+    if not node.move_to_position(
+        packing_above_x,
+        packing_above_y,
+        packing_above_z,
+        "packing_box_above_high",
+        goal_tolerance,
+    ):
+        node.move_to_position(
+            safe_x,
+            safe_y,
+            safe_z,
+            "return_safe_after_packing_failed",
+            goal_tolerance,
+        )
+        node.destroy_node()
+        rclpy.shutdown()
+        return
+
+    # 5. 最后回安全点
+    node.move_to_position(
+        safe_x,
+        safe_y,
+        safe_z,
+        "safe_high_point_3",
+        goal_tolerance,
+    )
+
+    node.get_logger().info("安全点位测试完成。")
+
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

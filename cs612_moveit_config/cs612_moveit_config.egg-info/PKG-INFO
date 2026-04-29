@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: cs612_moveit_config
+Version: 0.1.0
+Summary: MoveIt 2 configuration for CS612 arm
+Maintainer: TODO
+Maintainer-email: todo@example.com
+License: BSD-3-Clause
+Requires-Dist: setuptools
+Requires-Dist: pyyaml
+Dynamic: license
+Dynamic: maintainer
+Dynamic: maintainer-email
+Dynamic: requires-dist
+Dynamic: summary

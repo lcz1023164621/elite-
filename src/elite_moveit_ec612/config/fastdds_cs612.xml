@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  FastDDS profile for CS612 simulation.
+  Set environment variables:
+    FASTRTPS_DEFAULT_PROFILES_FILE=<path to this file>
+    RMW_FASTRTPS_USE_QOS_FROM_XML=1
+
+  Uses PREALLOCATED_WITH_REALLOC memory policy and large TX/RX socket buffers
+  to handle large ROS messages (PlanningScene, TF, JointState) without
+  "sequence size exceeds remaining buffer" warnings.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <participant profile_name="cs612_participant" is_default_profile="true">
+    <rtps>
+      <builtin>
+        <readerHistoryMemoryPolicy>PREALLOCATED_WITH_REALLOC</readerHistoryMemoryPolicy>
+        <writerHistoryMemoryPolicy>PREALLOCATED_WITH_REALLOC</writerHistoryMemoryPolicy>
+      </builtin>
+      <sendSocketBufferSize>8388608</sendSocketBufferSize>
+      <listenSocketBufferSize>8388608</listenSocketBufferSize>
+    </rtps>
+  </participant>
+
+  <publisher profile_name="cs612_large_publisher" is_default_profile="true">
+    <historyMemoryPolicy>PREALLOCATED_WITH_REALLOC</historyMemoryPolicy>
+  </publisher>
+
+  <subscriber profile_name="cs612_large_subscriber" is_default_profile="true">
+    <historyMemoryPolicy>PREALLOCATED_WITH_REALLOC</historyMemoryPolicy>
+  </subscriber>
+</profiles>

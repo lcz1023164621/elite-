@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  WSL/使用 conda ROS 时，默认 Cyclone 缓冲区偏小易出现
+  "sequence size exceeds remaining buffer"，进而 Marker/joint_states 等话题异常。
+  在 launch 中设置 CYCLONEDDS_URI=file://.../cyclonedds.xml（若使用 rmw_cyclonedds_cpp）。
+-->
+<CycloneDDS xmlns="https://cyclonedds.apache.org/schema/config">
+  <Domain id="any">
+    <General>
+      <NetworkInterfaceAddress>auto</NetworkInterfaceAddress>
+    </General>
+    <Internal>
+      <Watermarks>
+        <WhcHigh>8MB</WhcHigh>
+      </Watermarks>
+    </Internal>
+  </Domain>
+</CycloneDDS>

@@ -1,0 +1,89 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="cs612">
+  <!--
+    CS612 with suction cup end-effector for Gazebo Ignition simulation.
+    Includes official cs_macro and adds:
+      - suction_cup_link (EE fixture)
+      - suction_tcp_link (tool center point)
+      - ROS2 control hardware tag
+  -->
+  <xacro:include filename="$(find eli_cs_robot_description)/urdf/cs_macro.xacro" />
+
+  <xacro:arg name="cs_type" default="cs612" />
+  <xacro:arg name="use_fake_hardware" default="false" />
+  <xacro:arg name="sim_ignition" default="true" />
+  <xacro:arg name="sim_gazebo" default="false" />
+  <xacro:arg name="generate_ros2_control_tag" default="true" />
+  <xacro:arg name="suction_tcp_offset_z" default="0.214" />
+  <xacro:arg name="initial_positions_file" default="$(find eli_cs_robot_description)/config/initial_positions.yaml"/>
+
+  <xacro:property name="initial_positions_file" default="$(arg initial_positions_file)"/>
+
+  <link name="world" />
+
+  <xacro:cs_robot
+    name="cs612"
+    tf_prefix=""
+    parent="world"
+    joint_limits_parameters_file="$(find eli_cs_robot_description)/config/$(arg cs_type)/joint_limits.yaml"
+    kinematics_parameters_file="$(find eli_cs_robot_description)/config/$(arg cs_type)/default_kinematics.yaml"
+    physical_parameters_file="$(find eli_cs_robot_description)/config/$(arg cs_type)/physical_parameters.yaml"
+    visual_parameters_file="$(find eli_cs_robot_description)/config/$(arg cs_type)/visual_parameters.yaml"
+    use_fake_hardware="$(arg use_fake_hardware)"
+    sim_ignition="$(arg sim_ignition)"
+    sim_gazebo="$(arg sim_gazebo)"
+    generate_ros2_control_tag="$(arg generate_ros2_control_tag)"
+    initial_positions="${xacro.load_yaml(initial_positions_file)}"
+  >
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </xacro:cs_robot>
+
+  <xacro:if value="$(arg sim_ignition)">
+    <gazebo reference="world">
+    </gazebo>
+    <gazebo>
+      <plugin filename="libign_ros2_control-system.so" name="ign_ros2_control::IgnitionROS2ControlPlugin">
+        <controller_manager_node_name>controller_manager</controller_manager_node_name>
+      </plugin>
+    </gazebo>
+  </xacro:if>
+
+  <!-- suction_cup_link: end-effector fixture -->
+  <link name="suction_cup_link">
+    <inertial>
+      <origin xyz="0 0 0.1065" rpy="0 0 0" />
+      <mass value="0.066436" />
+      <inertia ixx="2.91178E-04" ixy="0" ixz="0" iyy="2.91178E-04" iyz="0" izz="8.00000E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/ee_111_repaired.stl" />
+      </geometry>
+      <material name="ee_grey">
+        <color rgba="0.76 0.78 0.80 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/ee_111_repaired.stl" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="wrist_3-suction_cup" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="wrist_3_link" />
+    <child link="suction_cup_link" />
+  </joint>
+
+  <!-- Tool center point -->
+  <link name="suction_tcp_link" />
+  <joint name="suction_cup-tcp" type="fixed">
+    <origin xyz="0 0 $(arg suction_tcp_offset_z)" rpy="0 0 0" />
+    <parent link="suction_cup_link" />
+    <child link="suction_tcp_link" />
+  </joint>
+
+</robot>

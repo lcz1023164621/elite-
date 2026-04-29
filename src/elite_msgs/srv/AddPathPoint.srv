@@ -1,0 +1,13 @@
+float32[] way_point # (list): 目标位置
+uint8 move_type # (int): 0 关节运动,1 直线运动(旋转速度由直线速度决定),2 直线运动(直线速度由旋转速度决定),3 圆弧运动
+uint8 speed_type # (int): 速度类型,0:V(直线速度)对应speed为[1,3000],1:VR(旋转角速度)对应speed为[1-300],2:AV(绝对直线速度)对应[min_AV,max_AV],3:AVR(绝对旋转角速度)对应[min_AVR,max_AVR]
+float32 speed # (float): 运动速度,无speed_type参数时,对应关节速度[1,100]、直线及圆弧速度[1,3000],旋转速度[1,300]
+uint32 acc # (int, optional): 加速度, Defaults to 20.
+uint32 dec # (int, optional): 减速度, Defaults to 20.
+uint8 smooth # (int, optional): 平滑度, 0~7, 该参数与交融半径选择其一就好, 该参数逐渐废弃, Defaults to 0.
+uint32 circular_radius # (int, optional): 交融半径, 0~2147483647,该值根据不同的点位从而计算出不同的交融半径, Defaults to 0.
+uint8 cond_type # (int, optional): IO类型,0为输入,1为输出.
+uint8 cond_num # (int, optional): IO地址,0~63.
+uint8 cond_value # (int, optional): IO状态,0/1,io状态一致时,立即放弃该运动,执行下一条指令.
+---
+bool result

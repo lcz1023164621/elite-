@@ -1,0 +1,334 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="cs612">
+
+  <link name="base_link" />
+
+  <link name="base_link_inertia">
+    <inertial>
+      <origin xyz="5.67149240033586E-05 -0.000105244825639109 0.0659791955027099" rpy="0 0 0" />
+      <mass value="0.948882914788405" />
+      <inertia ixx="0.00296071190840501" ixy="-1.01895818620175E-06" ixz="5.26854170304019E-06"
+               iyy="0.00262218735357496" iyz="-2.89514354564923E-06" izz="0.00399062567997713" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/base_link.STL" />
+      </geometry>
+      <material name=""><color rgba="1 1 1 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="base_link-base_link_inertia" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="base_link_inertia" />
+  </joint>
+
+  <!-- shoulder_link -->
+  <link name="shoulder_link">
+    <inertial>
+      <origin xyz="9.3E-05 -0.02697 -0.02115" rpy="0 0 0" />
+      <mass value="6.83" />
+      <inertia ixx="0.039228" ixy="-2.8388E-05" ixz="3.9289E-05"
+               iyy="0.025078" iyz="-0.00028825" izz="0.037499" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link1.STL" />
+      </geometry>
+      <material name=""><color rgba="1 1 1 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link1.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="shoulder_pan_joint" type="revolute">
+    <origin xyz="0 0 0.193" rpy="0 0 0" />
+    <parent link="base_link_inertia" />
+    <child link="shoulder_link" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.14159" upper="3.14159" effort="330" velocity="2.094" />
+  </joint>
+
+  <!-- upperarm_link -->
+  <link name="upperarm_link">
+    <inertial>
+      <origin xyz="-0.2304 -3.9E-05 0.16068" rpy="0 0 0" />
+      <mass value="13.037" />
+      <inertia ixx="0.3734" ixy="-5.985E-05" ixz="-0.5014"
+               iyy="2.0187" iyz="-0.00013287" izz="1.681" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link2.STL" />
+      </geometry>
+      <material name=""><color rgba="1 1 1 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link2.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="shoulder_lift_joint" type="revolute">
+    <origin xyz="0 0 0" rpy="1.5708 0 0" />
+    <parent link="shoulder_link" />
+    <child link="upperarm_link" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.14159" upper="3.14159" effort="330" velocity="2.094" />
+  </joint>
+
+  <!-- forearm_link -->
+  <link name="forearm_link">
+    <inertial>
+      <origin xyz="-0.2998 1.3E-05 0.06176" rpy="0 0 0" />
+      <mass value="4.827" />
+      <inertia ixx="0.030106" ixy="-1.25E-05" ixz="-0.076554"
+               iyy="0.76404" iyz="1.326E-06" izz="0.7421" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link3.STL" />
+      </geometry>
+      <material name=""><color rgba="0.79216 0.81961 0.93333 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link3.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="elbow_joint" type="revolute">
+    <origin xyz="-0.615 0 0" rpy="0 0 0" />
+    <parent link="upperarm_link" />
+    <child link="forearm_link" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.14159" upper="3.14159" effort="150" velocity="3.142" />
+  </joint>
+
+  <!-- wrist_1_link -->
+  <link name="wrist_1_link">
+    <inertial>
+      <origin xyz="1E-05 -0.0148 -0.01682" rpy="0 0 0" />
+      <mass value="2.315" />
+      <inertia ixx="0.0060891" ixy="1.219E-06" ixz="-4.067E-06"
+               iyy="0.0049703" iyz="-1.2747E-05" izz="0.0033067" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link4.STL" />
+      </geometry>
+      <material name=""><color rgba="0.79216 0.81961 0.93333 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link4.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="wrist_1_joint" type="revolute">
+    <origin xyz="-0.571 0 0.1775" rpy="0 0 0" />
+    <parent link="forearm_link" />
+    <child link="wrist_1_link" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.14159" upper="3.14159" effort="56" velocity="3.142" />
+  </joint>
+
+  <!-- wrist_2_link -->
+  <link name="wrist_2_link">
+    <inertial>
+      <origin xyz="-1.3E-05 0.015559 -0.011803" rpy="0 0 0" />
+      <mass value="2.195" />
+      <inertia ixx="0.004638045" ixy="1.311E-06" ixz="3.829E-06"
+               iyy="0.003507337" iyz="1.4183E-05" izz="0.003129668" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link5.STL" />
+      </geometry>
+      <material name=""><color rgba="0.79216 0.81961 0.93333 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link5.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="wrist_2_joint" type="revolute">
+    <origin xyz="0 -0.118 0" rpy="1.5708 0 0" />
+    <parent link="wrist_1_link" />
+    <child link="wrist_2_link" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.14159" upper="3.14159" effort="56" velocity="3.142" />
+  </joint>
+
+  <!-- wrist_3_link -->
+  <link name="wrist_3_link">
+    <inertial>
+      <origin xyz="-0.001704 -0.000705 -0.039231" rpy="0 0 0" />
+      <mass value="0.616" />
+      <inertia ixx="0.0016942" ixy="1.27E-07" ixz="1.9782E-05"
+               iyy="0.0017123" iyz="7.7E-06" izz="0.0005701" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link6.STL" />
+      </geometry>
+      <material name=""><color rgba="1 1 1 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/link6.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="wrist_3_joint" type="revolute">
+    <origin xyz="0 0.1103 0" rpy="-1.5708 0 0" />
+    <parent link="wrist_2_link" />
+    <child link="wrist_3_link" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.14159" upper="3.14159" effort="56" velocity="3.142" />
+  </joint>
+
+  <!--
+    末端执行器替换为 my_arms/111/夹吸组合夹具 导出的新模型。
+    安装策略：保持 suction_cup_link 原点与 wrist_3_link 法兰原点重合，以兼容现有 MoveIt 配置。
+  -->
+  <link name="suction_cup_link">
+    <inertial>
+      <origin xyz="0 0 0.1065" rpy="0 0 0" />
+      <mass value="0.066436" />
+      <inertia ixx="2.91178E-04" ixy="0" ixz="0" iyy="2.91178E-04" iyz="0" izz="8.00000E-05" />
+    </inertial>
+    <visual name="ee_111_visual">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/ee_111_repaired.stl" />
+      </geometry>
+      <material name="cs612_body_color">
+        <color rgba="0.79216 0.81961 0.93333 1.0" />
+      </material>
+    </visual>
+    <visual name="suction_piston_left">
+      <origin xyz="-0.018 0 0.206" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="0.010" radius="0.003" />
+      </geometry>
+      <material name="piston_metal">
+        <color rgba="0.76 0.78 0.80 1.0" />
+      </material>
+    </visual>
+    <visual name="suction_piston_right">
+      <origin xyz="0.018 0 0.206" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="0.010" radius="0.003" />
+      </geometry>
+      <material name="piston_metal">
+        <color rgba="0.76 0.78 0.80 1.0" />
+      </material>
+    </visual>
+    <visual name="suction_boot_left">
+      <origin xyz="-0.018 0 0.211" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="0.006" radius="0.006" />
+      </geometry>
+      <material name="soft_rubber_dark">
+        <color rgba="0.16 0.16 0.16 0.98" />
+      </material>
+    </visual>
+    <visual name="suction_boot_right">
+      <origin xyz="0.018 0 0.211" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="0.006" radius="0.006" />
+      </geometry>
+      <material name="soft_rubber_dark">
+        <color rgba="0.16 0.16 0.16 0.98" />
+      </material>
+    </visual>
+    <visual name="suction_lip_left">
+      <origin xyz="-0.018 0 0.214" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="0.003" radius="0.009" />
+      </geometry>
+      <material name="soft_rubber_black">
+        <color rgba="0.08 0.08 0.08 1.0" />
+      </material>
+    </visual>
+    <visual name="suction_lip_right">
+      <origin xyz="0.018 0 0.214" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="0.003" radius="0.009" />
+      </geometry>
+      <material name="soft_rubber_black">
+        <color rgba="0.08 0.08 0.08 1.0" />
+      </material>
+    </visual>
+    <collision name="ee_111_collision">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://CS612urdf/meshes/ee_111_repaired.stl" />
+      </geometry>
+    </collision>
+    <collision name="suction_lip_left_collision">
+      <origin xyz="-0.018 0 0.214" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="0.004" radius="0.010" />
+      </geometry>
+    </collision>
+    <collision name="suction_lip_right_collision">
+      <origin xyz="0.018 0 0.214" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="0.004" radius="0.010" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="joint_suction_cup" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="wrist_3_link" />
+    <child link="suction_cup_link" />
+  </joint>
+
+  <link name="suction_tcp_link" />
+  <joint name="joint_suction_tcp" type="fixed">
+    <origin xyz="0 0 0.214" rpy="0 0 0" />
+    <parent link="suction_cup_link" />
+    <child link="suction_tcp_link" />
+  </joint>
+
+  <gazebo reference="suction_cup_link">
+    <plugin name="gazebo_vacuum_gripper" filename="libgazebo_ros_vacuum_gripper.so">
+      <robotNamespace>/</robotNamespace>
+      <link_name>suction_cup_link</link_name>
+      <max_distance>0.05</max_distance>
+    </plugin>
+  </gazebo>
+
+</robot>

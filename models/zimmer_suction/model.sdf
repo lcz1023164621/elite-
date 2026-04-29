@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="zimmer_suction">
+    <static>false</static>
+    <link name="suction_body">
+      <pose>0 0 0.05 0 0 0</pose>
+      <inertial>
+        <mass>0.15</mass>
+        <inertia>
+          <ixx>5e-5</ixx><iyy>5e-5</iyy><izz>6e-5</izz>
+        </inertia>
+      </inertial>
+      
+      <!-- 金属螺纹连接头 -->
+      <visual name="thread">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>0.012</radius><length>0.01</length></cylinder>
+        </geometry>
+        <material>
+          <ambient>0.7 0.7 0.7 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+        </material>
+      </visual>
+      
+      <!-- 金属适配器 -->
+      <visual name="adapter">
+        <pose>0 0 -0.01 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>0.025</radius><length>0.01</length></cylinder>
+        </geometry>
+        <material>
+          <ambient>0.7 0.7 0.7 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+        </material>
+      </visual>
+      
+      <!-- 绿色波纹吸盘 -->
+      <visual name="bellows">
+        <pose>0 0 -0.025 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>0.035</radius><length>0.02</length></cylinder>
+        </geometry>
+        <material>
+          <ambient>0.2 0.8 0.3 1</ambient>
+          <diffuse>0.2 0.8 0.3 1</diffuse>
+        </material>
+      </visual>
+      
+      <!-- 红色底部吸盘垫 -->
+      <visual name="pad">
+        <pose>0 0 -0.04 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>0.045</radius><length>0.01</length></cylinder>
+        </geometry>
+        <material>
+          <ambient>0.9 0.2 0.2 1</ambient>
+          <diffuse>0.9 0.2 0.2 1</diffuse>
+        </material>
+      </visual>
+      
+      <collision name="collision">
+        <pose>0 0 -0.04 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>0.045</radius><length>0.01</length></cylinder>
+        </geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

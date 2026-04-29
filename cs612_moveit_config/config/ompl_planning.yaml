@@ -1,0 +1,52 @@
+planning_plugin: ompl_interface/OMPLPlanner
+request_adapters: >-
+  default_planner_request_adapters/AddTimeOptimalParameterization
+  default_planner_request_adapters/ResolveConstraintFrames
+  default_planner_request_adapters/FixWorkspaceBounds
+  default_planner_request_adapters/FixStartStateBounds
+  default_planner_request_adapters/FixStartStateCollision
+  default_planner_request_adapters/FixStartStatePathConstraints
+start_state_max_bounds_error: 0.1
+
+arm:
+  planner_configs:
+    - RRTConnect
+    - RRT
+    - RRTstar
+    - TRRT
+    - PRM
+    - PRMstar
+  default_planner_config: RRTConnect
+  projection_evaluator: joints(shoulder_pan_joint,shoulder_lift_joint)
+  longest_valid_segment_fraction: 0.005
+
+planner_configs:
+  RRTConnect:
+    type: geometric::RRTConnect
+    range: 0.0
+  RRT:
+    type: geometric::RRT
+    range: 0.0
+    goal_bias: 0.05
+  RRTstar:
+    type: geometric::RRTstar
+    range: 0.0
+    goal_bias: 0.05
+    delay_collision_checking: 1
+  TRRT:
+    type: geometric::TRRT
+    range: 0.0
+    goal_bias: 0.05
+    maxStatesFailed: 10
+    temp_change_factor: 2.0
+    minTemperature: 10e-10
+    initTemperature: 10e-6
+    fractionPDB: 0.1
+    K: 1.0
+    alpha: 0.3
+    beta: 0.05
+  PRM:
+    type: geometric::PRM
+    max_nearest_neighbors: 10
+  PRMstar:
+    type: geometric::PRMstar

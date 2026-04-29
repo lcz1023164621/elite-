@@ -1,0 +1,43 @@
+# ============================================================================
+# environment_elite.yml — Elite ROS 2 Humble + Conda 辅助 Python 环境
+# ============================================================================
+#
+# 【重要】本文件仅管理纯 Python 科学计算/辅助依赖，不包含任何 ROS 包。
+# ROS 2 Humble、MoveIt、Gazebo 等必须通过 apt + rosdep 安装。
+#
+# 创建环境：
+#   conda env create -f environment_elite.yml
+#
+# 更新环境（修改此文件后）：
+#   conda env update -f environment_elite.yml --prune
+#
+# 激活环境：
+#   conda activate elite
+#
+# 使用流程（ROS + Conda 叠加）：
+#   1. source /opt/ros/humble/setup.bash
+#   2. source /mnt/e/gazebo_projects/my_first_world/install/setup.bash
+#      （或 source /mnt/e/gazebo_projects/my_first_world/elite_ros_ws/install/setup.bash）
+#   3. conda activate elite            # 仅在需要纯 Python 辅助脚本时
+#
+# 验证：
+#   python --version                   # 应为 Python 3.10.x
+#   which python                       # 应指向 .../envs/elite/bin/python
+#   python -c "import numpy; print(numpy.__version__)"
+#   python -c "import yaml; print('pyyaml OK')"
+#   # import rclpy 应在 source ROS 后使用系统 python，而非 conda python
+#
+# ============================================================================
+
+name: elite
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - numpy>=1.24
+      - scipy>=1.10
+      - pyyaml>=6.0
+      - transforms3d>=0.4
+      - opencv-python-headless>=4.5

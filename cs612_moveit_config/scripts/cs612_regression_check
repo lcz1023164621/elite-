@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""入口脚本：CS612 最小回归检查。"""
+from cs612_moveit_config.regression_checks import main
+
+if __name__ == "__main__":
+    main()

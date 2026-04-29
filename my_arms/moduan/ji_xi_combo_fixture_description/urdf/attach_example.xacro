@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ji_xi_combo_fixture_attach_example">
+  <!-- Example only: adjust parent, xyz, rpy to your robot -->
+  <link name="ji_xi_combo_fixture_mount"/>
+
+  <joint name="ee_to_fixture" type="fixed">
+    <parent link="YOUR_EE_LINK"/>
+    <child link="ji_xi_combo_fixture_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <xacro:include filename="$(find ji_xi_combo_fixture_description)/urdf/ji_xi_combo_fixture.urdf"/>
+</robot>

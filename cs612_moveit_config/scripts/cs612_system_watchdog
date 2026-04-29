@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""入口脚本：系统同步链路自检守护。"""
+from cs612_moveit_config.system_watchdog import main
+
+if __name__ == "__main__":
+    main()

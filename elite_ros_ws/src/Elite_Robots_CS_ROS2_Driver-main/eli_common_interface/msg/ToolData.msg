@@ -1,0 +1,8 @@
+uint8 mode
+float64 output_voltage
+float64 output_current
+float64 temperature
+uint8 analog_input_type
+float64 analog_input
+uint8 analog_output_type
+float64 analog_output

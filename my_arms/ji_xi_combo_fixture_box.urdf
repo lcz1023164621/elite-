@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<robot name="ji_xi_combo_fixture_box">
+  <!--
+    Simplified fallback URDF using the STEP bounding box only.
+    Useful for quick collision testing.
+  -->
+  <link name="ji_xi_combo_fixture_link">
+    <inertial>
+      <origin xyz="0.152202 -0.012445 0.061600" rpy="0 0 0"/>
+      <mass value="1.000000"/>
+      <inertia ixx="0.005016818" ixy="0.0" ixz="0.0"
+               iyy="0.025541153" iyz="0.0" izz="0.022724265"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.152202 -0.012445 0.061600" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.509403 0.114889 0.216800"/>
+      </geometry>
+      <material name="orange"><color rgba="1.0 0.55 0.15 0.8"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0.152202 -0.012445 0.061600" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.509403 0.114889 0.216800"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

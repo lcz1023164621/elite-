@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""入口脚本：直接 import main，不依赖 pip dist-info（避免 PackageNotFoundError）。"""
+from cs612_moveit_config.joint_states_bridge import main
+
+if __name__ == "__main__":
+    main()

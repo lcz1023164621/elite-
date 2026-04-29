@@ -1,0 +1,9 @@
+# 抓取演示关节目标（弧度）。顺序：
+# shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint, wrist_2_joint, wrist_3_joint
+home: [0.0, -1.5707, 0.0, -1.5707, 1.5707, 0.0]
+# 矩形物上方预定位姿（吸盘接近）
+pick_pre: [0.65, -0.52, 0.78, 0.0, 1.05, 0.0]
+# 下压至可吸附高度（TCP 靠近顶面）
+pick_touch: [0.68, -0.48, 0.82, 0.0, 1.08, 0.0]
+# 放入右侧纸箱上方
+place: [0.55, -0.35, 0.72, 0.0, 0.95, 0.0]

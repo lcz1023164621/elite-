@@ -1,0 +1,6 @@
+# Service to popup
+string arg
+string message
+---
+bool success
+string message

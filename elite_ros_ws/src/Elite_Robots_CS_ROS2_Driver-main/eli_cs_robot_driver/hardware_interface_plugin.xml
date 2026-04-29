@@ -1,0 +1,9 @@
+<library path="eli_cs_hardware_interface_plugin">
+  <class name="ELITE_CS_ROBOT_ROS_DRIVER/EliteCSPositionHardwareInterface"
+         type="ELITE_CS_ROBOT_ROS_DRIVER::EliteCSPositionHardwareInterface"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+		ROS2 Control System Driver for the Elite Robots CS series.
+    </description>
+  </class>
+</library>

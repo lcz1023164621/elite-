@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>ji_xi_combo_fixture_description</name>
+  <version>0.0.1</version>
+  <description>URDF package generated from STEP (convex-hull approximation)</description>
+  <maintainer email="todo@example.com">OpenAI</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>urdf</exec_depend>
+</package>

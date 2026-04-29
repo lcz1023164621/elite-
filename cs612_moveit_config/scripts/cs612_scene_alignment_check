@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Check scene_objects.yaml consistency with worlds/my_world.sdf."""
+from __future__ import annotations
+
+import math
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+import yaml
+
+
+def _parse_pose(text: str) -> tuple[float, float, float]:
+    vals = [float(v) for v in text.strip().split()]
+    if len(vals) < 3:
+        raise ValueError(f"invalid pose: {text}")
+    return vals[0], vals[1], vals[2]
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parents[2]
+    world_file = root / "worlds" / "my_world.sdf"
+    cfg_file = root / "cs612_moveit_config" / "config" / "scene_objects.yaml"
+
+    world = ET.fromstring(world_file.read_text(encoding="utf-8"))
+    cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
+
+    rect_model = world.find(".//model[@name='rect_pickup']/pose")
+    carton_model = world.find(".//model[@name='carton_box']/pose")
+    if rect_model is None or carton_model is None:
+        print("FAIL: world 缺少 rect_pickup/carton_box pose")
+        return 2
+
+    rx, ry, rz = _parse_pose(rect_model.text or "")
+    cx, cy, cz = _parse_pose(carton_model.text or "")
+
+    rect_cfg = cfg.get("rect_pickup", {})
+    carton_cfg = cfg.get("carton_box", {})
+    rect_center = rect_cfg.get("center_xyz", [rx, ry, rz])
+    carton_pose = carton_cfg.get("model_pose_xyz", [cx, cy, cz])
+
+    d_rect = math.sqrt((float(rect_center[0]) - rx) ** 2 + (float(rect_center[1]) - ry) ** 2 + (float(rect_center[2]) - rz) ** 2)
+    d_carton = math.sqrt((float(carton_pose[0]) - cx) ** 2 + (float(carton_pose[1]) - cy) ** 2 + (float(carton_pose[2]) - cz) ** 2)
+
+    tol = 1e-4
+    ok = d_rect <= tol and d_carton <= tol
+    if ok:
+        print("PASS: scene_objects.yaml 与 my_world.sdf 点位一致")
+        return 0
+    print(
+        "FAIL: 场景点位不一致 "
+        f"(rect_diff={d_rect:.6f}, carton_diff={d_carton:.6f}); "
+        "请同步更新 scene_objects.yaml 与 worlds/my_world.sdf"
+    )
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

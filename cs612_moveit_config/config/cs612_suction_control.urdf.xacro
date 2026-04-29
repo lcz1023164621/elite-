@@ -1,0 +1,140 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="cs612">
+  <!-- Project wrapper around the official Elite CS macro.
+       It keeps the official robot geometry/controllers and only adds the
+       suction TCP plus the Gazebo detachable-joint interface used by this demo. -->
+  <xacro:include filename="$(find eli_cs_robot_description)/urdf/cs_macro.xacro" />
+
+  <xacro:arg name="cs_type" default="cs612" />
+  <xacro:arg name="name" default="cs612" />
+  <xacro:arg name="prefix" default="" />
+  <xacro:arg name="safety_limits" default="true" />
+  <xacro:arg name="safety_pos_margin" default="0.15" />
+  <xacro:arg name="safety_k_position" default="20" />
+  <xacro:arg name="use_fake_hardware" default="false" />
+  <xacro:arg name="fake_sensor_commands" default="false" />
+  <xacro:arg name="sim_ignition" default="true" />
+  <xacro:arg name="simulation_controllers" default="" />
+  <xacro:arg name="suction_tcp_offset_z" default="0.214" />
+  <xacro:arg name="initial_positions_file" default="$(find eli_cs_robot_description)/config/initial_positions.yaml" />
+
+  <xacro:property name="initial_positions_file" default="$(arg initial_positions_file)" />
+  <xacro:property name="suction_mesh" value="file://$(find CS612urdf)/meshes/ee_111_repaired.stl" />
+  <material name="cs612_body_color">
+    <color rgba="0.79216 0.81961 0.93333 1.0" />
+  </material>
+  <material name="soft_rubber_black">
+    <color rgba="0.02 0.02 0.02 1.0" />
+  </material>
+
+  <link name="world" />
+
+  <xacro:cs_robot
+    name="$(arg name)"
+    tf_prefix="$(arg prefix)"
+    parent="world"
+    joint_limits_parameters_file="$(find eli_cs_robot_description)/config/$(arg cs_type)/joint_limits.yaml"
+    kinematics_parameters_file="$(find eli_cs_robot_description)/config/$(arg cs_type)/default_kinematics.yaml"
+    physical_parameters_file="$(find eli_cs_robot_description)/config/$(arg cs_type)/physical_parameters.yaml"
+    visual_parameters_file="$(find eli_cs_robot_description)/config/$(arg cs_type)/visual_parameters.yaml"
+    safety_limits="$(arg safety_limits)"
+    safety_pos_margin="$(arg safety_pos_margin)"
+    safety_k_position="$(arg safety_k_position)"
+    use_fake_hardware="$(arg use_fake_hardware)"
+    fake_sensor_commands="$(arg fake_sensor_commands)"
+    sim_ignition="$(arg sim_ignition)"
+    initial_positions="${xacro.load_yaml(initial_positions_file)}">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </xacro:cs_robot>
+
+  <xacro:if value="$(arg sim_ignition)">
+    <gazebo>
+      <plugin filename="libign_ros2_control-system.so" name="ign_ros2_control::IgnitionROS2ControlPlugin">
+        <parameters>$(arg simulation_controllers)</parameters>
+        <controller_manager_node_name>$(arg prefix)controller_manager</controller_manager_node_name>
+      </plugin>
+    </gazebo>
+  </xacro:if>
+
+  <link name="$(arg prefix)suction_cup_link">
+    <inertial>
+      <origin xyz="0 0 0.1065" rpy="0 0 0" />
+      <mass value="0.066436" />
+      <inertia ixx="2.91178E-04" ixy="0" ixz="0" iyy="2.91178E-04" iyz="0" izz="8.00000E-05" />
+    </inertial>
+    <visual name="ee_111_visual">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="${suction_mesh}" />
+      </geometry>
+      <material name="cs612_body_color">
+        <color rgba="0.79216 0.81961 0.93333 1.0" />
+      </material>
+    </visual>
+    <visual name="rubber_pad_left_visual">
+      <origin xyz="-0.018 0 0.214" rpy="0 0 0" />
+      <geometry>
+        <box size="0.030 0.020 0.006" />
+      </geometry>
+      <material name="soft_rubber_black" />
+    </visual>
+    <visual name="rubber_pad_right_visual">
+      <origin xyz="0.018 0 0.214" rpy="0 0 0" />
+      <geometry>
+        <box size="0.030 0.020 0.006" />
+      </geometry>
+      <material name="soft_rubber_black" />
+    </visual>
+    <collision name="ee_111_collision">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="${suction_mesh}" />
+      </geometry>
+    </collision>
+    <collision name="rubber_pad_left_collision">
+      <origin xyz="-0.018 0 0.214" rpy="0 0 0" />
+      <geometry>
+        <box size="0.030 0.020 0.006" />
+      </geometry>
+    </collision>
+    <collision name="rubber_pad_right_collision">
+      <origin xyz="0.018 0 0.214" rpy="0 0 0" />
+      <geometry>
+        <box size="0.030 0.020 0.006" />
+      </geometry>
+    </collision>
+  </link>
+
+  <gazebo reference="$(arg prefix)suction_cup_link">
+    <mu1>5.0</mu1>
+    <mu2>5.0</mu2>
+    <kp>100000</kp>
+    <kd>1000</kd>
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <joint name="$(arg prefix)wrist_3-suction_cup" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="$(arg prefix)wrist_3_link" />
+    <child link="$(arg prefix)suction_cup_link" />
+  </joint>
+
+  <link name="$(arg prefix)suction_tcp_link" />
+  <joint name="$(arg prefix)suction_cup-tcp" type="fixed">
+    <origin xyz="0 0 $(arg suction_tcp_offset_z)" rpy="0 0 0" />
+    <parent link="$(arg prefix)suction_cup_link" />
+    <child link="$(arg prefix)suction_tcp_link" />
+  </joint>
+
+  <gazebo>
+    <plugin filename="ignition-gazebo-detachable-joint-system"
+            name="ignition::gazebo::systems::DetachableJoint">
+      <parent_link>$(arg prefix)wrist_3_link</parent_link>
+      <child_model>rect_pickup</child_model>
+      <child_link>box_link</child_link>
+      <attach_topic>/cs612/suction/attach</attach_topic>
+      <detach_topic>/cs612/suction/detach</detach_topic>
+      <output_topic>/cs612/suction/state</output_topic>
+    </plugin>
+  </gazebo>
+</robot>

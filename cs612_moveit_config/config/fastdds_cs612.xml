@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  若 RMW 为 Fast DDS（rmw_fastrtps_cpp），可在 launch 中设置：
+  FASTRTPS_DEFAULT_PROFILES_FILE=<本文件绝对路径>
+  以缓解大消息 / 高负载下的序列化缓冲问题。
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <participant profile_name="cs612_participant" is_default_profile="true">
+    <rtps>
+      <builtin>
+        <readerHistoryMemoryPolicy>PREALLOCATED_WITH_REALLOC</readerHistoryMemoryPolicy>
+        <writerHistoryMemoryPolicy>PREALLOCATED_WITH_REALLOC</writerHistoryMemoryPolicy>
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>

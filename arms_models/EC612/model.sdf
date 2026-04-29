@@ -1,0 +1,650 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="EC612">
+    <static>false</static>
+    <joint name="world_fixed" type="fixed">
+      <parent>world</parent>
+      <child>base_link</child>
+    </joint>
+
+    <!-- base_link -->
+    <link name="base_link">
+      <inertial>
+        <pose>5.67149240033586e-05 -0.000105244825639109 0.0659791955027099 0 0 0</pose>
+        <mass>0.948882914788405</mass>
+        <inertia>
+          <ixx>0.00296071190840501</ixx>
+          <ixy>-1.01895818620175e-06</ixy>
+          <ixz>5.26854170304019e-06</ixz>
+          <iyy>0.00262218735357496</iyy>
+          <iyz>-2.89514354564923e-06</iyz>
+          <izz>0.00399062567997713</izz>
+        </inertia>
+      </inertial>
+      <visual name="base_link_visual">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/base_link.STL</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+        </material>
+      </visual>
+      <collision name="base_link_collision">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/base_link.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- link1 -->
+    <link name="link1">
+      <pose relative_to="joint1">0 0 0 0 0 0</pose>
+      <inertial>
+        <pose>9.3e-05 -0.02697 -0.02115 0 0 0</pose>
+        <mass>6.83</mass>
+        <inertia>
+          <ixx>0.039228</ixx>
+          <ixy>-2.8388e-05</ixy>
+          <ixz>3.9289e-05</ixz>
+          <iyy>0.025078</iyy>
+          <iyz>-0.00028825</iyz>
+          <izz>0.037499</izz>
+        </inertia>
+      </inertial>
+      <visual name="link6_visual">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link1.STL</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+        </material>
+      </visual>
+      <collision name="link1_collision">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link1.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="joint1" type="revolute">
+      <pose relative_to="base_link">0 0 0.193 0 0 1.5708</pose>
+      <parent>base_link</parent>
+      <child>link1</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3.14159</lower>
+          <upper>3.14159</upper>
+          <effort>436</effort>
+          <velocity>3.0</velocity>
+        </limit>
+        <dynamics><damping>5</damping><friction>0</friction></dynamics>
+      </axis>
+    </joint>
+
+    <!-- link2 -->
+    <link name="link2">
+      <pose relative_to="joint2">0 0 0 0 0 0</pose>
+      <inertial>
+        <pose>-0.2304 -3.9e-05 0.16068 0 0 0</pose>
+        <mass>13.037</mass>
+        <inertia>
+          <ixx>0.3734</ixx>
+          <ixy>-5.985e-05</ixy>
+          <ixz>-0.5014</ixz>
+          <iyy>2.0187</iyy>
+          <iyz>-0.00013287</iyz>
+          <izz>1.681</izz>
+        </inertia>
+      </inertial>
+      <visual name="link2_visual">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link2.STL</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+        </material>
+      </visual>
+      <collision name="link2_collision">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link2.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="joint2" type="revolute">
+      <pose relative_to="link1">0 0 0 1.5708 1.5708 0</pose>
+      <parent>link1</parent>
+      <child>link2</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3.14159</lower>
+          <upper>3.14159</upper>
+          <effort>436</effort>
+          <velocity>3.0</velocity>
+        </limit>
+        <dynamics><damping>10</damping><friction>0</friction></dynamics>
+      </axis>
+    </joint>
+
+    <!-- link3 -->
+    <link name="link3">
+      <pose relative_to="joint3">0 0 0 0 0 0</pose>
+      <inertial>
+        <pose>-0.2998 1.3e-05 0.06176 0 0 0</pose>
+        <mass>4.827</mass>
+        <inertia>
+          <ixx>0.030106</ixx>
+          <ixy>-1.25e-05</ixy>
+          <ixz>-0.076554</ixz>
+          <iyy>0.76404</iyy>
+          <iyz>1.326e-06</iyz>
+          <izz>0.7421</izz>
+        </inertia>
+      </inertial>
+      <visual name="link3_visual">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link3.STL</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.79216 0.81961 0.93333 1</ambient>
+          <diffuse>0.79216 0.81961 0.93333 1</diffuse>
+        </material>
+      </visual>
+      <collision name="link3_collision">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link3.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="joint3" type="revolute">
+      <pose relative_to="link2">-0.615 0 0 0 0 0</pose>
+      <parent>link2</parent>
+      <child>link3</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3.14159</lower>
+          <upper>3.14159</upper>
+          <effort>207</effort>
+          <velocity>3.0</velocity>
+        </limit>
+        <dynamics><damping>5</damping><friction>0</friction></dynamics>
+      </axis>
+    </joint>
+
+    <!-- link4 -->
+    <link name="link4">
+      <pose relative_to="joint4">0 0 0 0 0 0</pose>
+      <inertial>
+        <pose>1e-05 -0.0148 -0.01682 0 0 0</pose>
+        <mass>2.315</mass>
+        <inertia>
+          <ixx>0.0060891</ixx>
+          <ixy>1.219e-06</ixy>
+          <ixz>-4.067e-06</ixz>
+          <iyy>0.0049703</iyy>
+          <iyz>-1.2747e-05</iyz>
+          <izz>0.0033067</izz>
+        </inertia>
+      </inertial>
+      <visual name="link4_visual">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link4.STL</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.79216 0.81961 0.93333 1</ambient>
+          <diffuse>0.79216 0.81961 0.93333 1</diffuse>
+        </material>
+      </visual>
+      <collision name="link4_collision">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link4.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="joint4" type="revolute">
+      <pose relative_to="link3">-0.571 0 0.1775 0 0 -1.5708</pose>
+      <parent>link3</parent>
+      <child>link4</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3.14159</lower>
+          <upper>3.14159</upper>
+          <effort>66</effort>
+          <velocity>6.0</velocity>
+        </limit>
+        <dynamics><damping>10</damping><friction>0</friction></dynamics>
+      </axis>
+    </joint>
+
+    <!-- link5 -->
+    <link name="link5">
+      <pose relative_to="joint5">0 0 0 0 0 0</pose>
+      <inertial>
+        <pose>-1.3e-05 0.015559 -0.011803 0 0 0</pose>
+        <mass>2.195</mass>
+        <inertia>
+          <ixx>0.004638045</ixx>
+          <ixy>1.311e-06</ixy>
+          <ixz>3.829e-06</ixz>
+          <iyy>0.003507337</iyy>
+          <iyz>1.4183e-05</iyz>
+          <izz>0.003129668</izz>
+        </inertia>
+      </inertial>
+      <visual name="link5_visual">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link5.STL</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.79216 0.81961 0.93333 1</ambient>
+          <diffuse>0.79216 0.81961 0.93333 1</diffuse>
+        </material>
+      </visual>
+      <collision name="link5_collision">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link5.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="joint5" type="revolute">
+      <pose relative_to="link4">0 -0.118 0 1.5708 0 0</pose>
+      <parent>link4</parent>
+      <child>link5</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3.14159</lower>
+          <upper>3.14159</upper>
+          <effort>66</effort>
+          <velocity>6.0</velocity>
+        </limit>
+        <dynamics><damping>10</damping><friction>0</friction></dynamics>
+      </axis>
+    </joint>
+
+    <!-- link6 -->
+    <link name="link6">
+      <pose relative_to="joint6">0 0 0 0 0 0</pose>
+      <inertial>
+        <pose>-0.001704 -0.000705 -0.039231 0 0 0</pose>
+        <mass>0.616</mass>
+        <inertia>
+          <ixx>0.0016942</ixx>
+          <ixy>1.27e-07</ixy>
+          <ixz>1.9782e-05</ixz>
+          <iyy>0.0017123</iyy>
+          <iyz>7.7e-06</iyz>
+          <izz>0.0005701</izz>
+        </inertia>
+      </inertial>
+      <visual name="link6_visual">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link6.STL</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+        </material>
+      </visual>
+      <collision name="link6_collision">
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/link6.STL</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="joint6" type="revolute">
+      <pose relative_to="link5">0 0.1103 0 -1.5708 0 0</pose>
+      <parent>link5</parent>
+      <child>link6</child>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <lower>-3.14159</lower>
+          <upper>3.14159</upper>
+          <effort>66</effort>
+          <velocity>6.0</velocity>
+        </limit>
+        <dynamics><damping>10</damping><friction>0</friction></dynamics>
+      </axis>
+    </joint>
+
+    <!--
+      末端工具替换为 my_arms/111/夹吸组合夹具 导出的新模型，
+      保持 suction_cup_link 名称不变以兼容既有 ROS 话题/MoveIt 配置。
+    -->
+    <link name="suction_cup_link">
+      <pose relative_to="joint_suction_cup">0 0 0 0 0 0</pose>
+      <inertial>
+        <pose>0 0 0.1065 0 0 0</pose>
+        <mass>0.066436</mass>
+        <inertia>
+          <ixx>2.91178e-04</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>2.91178e-04</iyy>
+          <iyz>0</iyz>
+          <izz>8.00000e-05</izz>
+        </inertia>
+      </inertial>
+      <visual name="ee_111_visual">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/ee_111_repaired.stl</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>1.00 0.42 0.05 1.0</ambient>
+          <diffuse>1.00 0.42 0.05 1.0</diffuse>
+          <specular>0.18 0.10 0.04 1.0</specular>
+          <emissive>0.10 0.03 0.00 1.0</emissive>
+        </material>
+      </visual>
+      <visual name="suction_piston_left">
+        <pose>-0.018 0 0.206 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.010</length>
+            <radius>0.003</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.05 0.82 0.95 1.0</ambient>
+          <diffuse>0.05 0.82 0.95 1.0</diffuse>
+          <specular>0.20 0.20 0.20 1.0</specular>
+        </material>
+      </visual>
+      <visual name="suction_piston_right">
+        <pose>0.018 0 0.206 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.010</length>
+            <radius>0.003</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.05 0.82 0.95 1.0</ambient>
+          <diffuse>0.05 0.82 0.95 1.0</diffuse>
+          <specular>0.20 0.20 0.20 1.0</specular>
+        </material>
+      </visual>
+      <visual name="suction_boot_left">
+        <pose>-0.018 0 0.211 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.006</length>
+            <radius>0.006</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.95 0.93 0.10 1.0</ambient>
+          <diffuse>0.95 0.93 0.10 1.0</diffuse>
+        </material>
+      </visual>
+      <visual name="suction_boot_right">
+        <pose>0.018 0 0.211 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.006</length>
+            <radius>0.006</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.95 0.93 0.10 1.0</ambient>
+          <diffuse>0.95 0.93 0.10 1.0</diffuse>
+        </material>
+      </visual>
+      <visual name="suction_lip_left">
+        <pose>-0.018 0 0.214 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.003</length>
+            <radius>0.009</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.92 0.10 0.10 1.0</ambient>
+          <diffuse>0.92 0.10 0.10 1.0</diffuse>
+        </material>
+      </visual>
+      <visual name="suction_lip_right">
+        <pose>0.018 0 0.214 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.003</length>
+            <radius>0.009</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.92 0.10 0.10 1.0</ambient>
+          <diffuse>0.92 0.10 0.10 1.0</diffuse>
+        </material>
+      </visual>
+      <collision name="ee_111_collision">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>package://elite_description/meshes/ec612/ee_111_repaired.stl</uri>
+          </mesh>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>2.2</mu>
+              <mu2>2.2</mu2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>12000</kp>
+              <kd>180</kd>
+              <max_vel>0.08</max_vel>
+              <min_depth>0.0015</min_depth>
+            </ode>
+          </contact>
+          <bounce>
+            <restitution_coefficient>0.0</restitution_coefficient>
+            <threshold>1000000.0</threshold>
+          </bounce>
+        </surface>
+      </collision>
+      <collision name="suction_lip_left_collision">
+        <pose>-0.018 0 0.214 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.004</length>
+            <radius>0.010</radius>
+          </cylinder>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>2.2</mu>
+              <mu2>2.2</mu2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>3200</kp>
+              <kd>70</kd>
+              <soft_cfm>0.010</soft_cfm>
+              <soft_erp>0.25</soft_erp>
+              <max_vel>0.06</max_vel>
+              <min_depth>0.001</min_depth>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+      <collision name="suction_lip_right_collision">
+        <pose>0.018 0 0.214 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.004</length>
+            <radius>0.010</radius>
+          </cylinder>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>2.2</mu>
+              <mu2>2.2</mu2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>3200</kp>
+              <kd>70</kd>
+              <soft_cfm>0.010</soft_cfm>
+              <soft_erp>0.25</soft_erp>
+              <max_vel>0.06</max_vel>
+              <min_depth>0.001</min_depth>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+    </link>
+
+    <joint name="joint_suction_cup" type="fixed">
+      <pose relative_to="link6">0 0 0 0 0 0</pose>
+      <parent>link6</parent>
+      <child>suction_cup_link</child>
+    </joint>
+
+    <plugin filename="ignition-gazebo-joint-state-publisher-system"
+            name="ignition::gazebo::systems::JointStatePublisher"/>
+
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>joint1</joint_name>
+      <topic>/model/EC612_arm/joint/joint1/0/cmd_pos</topic>
+      <initial_position>0</initial_position>
+      <p_gain>380</p_gain>
+      <i_gain>3.0</i_gain>
+      <d_gain>90</d_gain>
+      <i_max>80</i_max>
+      <i_min>-80</i_min>
+      <cmd_max>436</cmd_max>
+      <cmd_min>-436</cmd_min>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>joint2</joint_name>
+      <topic>/model/EC612_arm/joint/joint2/0/cmd_pos</topic>
+      <initial_position>0</initial_position>
+      <p_gain>1100</p_gain>
+      <i_gain>22</i_gain>
+      <d_gain>240</d_gain>
+      <i_max>420</i_max>
+      <i_min>-420</i_min>
+      <cmd_max>436</cmd_max>
+      <cmd_min>-436</cmd_min>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>joint3</joint_name>
+      <topic>/model/EC612_arm/joint/joint3/0/cmd_pos</topic>
+      <initial_position>0</initial_position>
+      <p_gain>420</p_gain>
+      <i_gain>7</i_gain>
+      <d_gain>95</d_gain>
+      <i_max>200</i_max>
+      <i_min>-200</i_min>
+      <cmd_max>207</cmd_max>
+      <cmd_min>-207</cmd_min>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>joint4</joint_name>
+      <topic>/model/EC612_arm/joint/joint4/0/cmd_pos</topic>
+      <initial_position>0</initial_position>
+      <p_gain>180</p_gain>
+      <i_gain>1.5</i_gain>
+      <d_gain>38</d_gain>
+      <i_max>40</i_max>
+      <i_min>-40</i_min>
+      <cmd_max>66</cmd_max>
+      <cmd_min>-66</cmd_min>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>joint5</joint_name>
+      <topic>/model/EC612_arm/joint/joint5/0/cmd_pos</topic>
+      <initial_position>0</initial_position>
+      <p_gain>240</p_gain>
+      <i_gain>1.5</i_gain>
+      <d_gain>52</d_gain>
+      <i_max>40</i_max>
+      <i_min>-40</i_min>
+      <cmd_max>66</cmd_max>
+      <cmd_min>-66</cmd_min>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>joint6</joint_name>
+      <topic>/model/EC612_arm/joint/joint6/0/cmd_pos</topic>
+      <initial_position>0</initial_position>
+      <p_gain>360</p_gain>
+      <i_gain>4.0</i_gain>
+      <d_gain>82</d_gain>
+      <i_max>60</i_max>
+      <i_min>-60</i_min>
+      <cmd_max>66</cmd_max>
+      <cmd_min>-66</cmd_min>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-detachable-joint-system"
+            name="ignition::gazebo::systems::DetachableJoint">
+      <parent_link>suction_cup_link</parent_link>
+      <child_model>rect_pickup</child_model>
+      <child_link>box_link</child_link>
+      <attach_topic>/ec612/suction/attach</attach_topic>
+      <detach_topic>/ec612/suction/detach</detach_topic>
+      <output_topic>/ec612/suction/state</output_topic>
+    </plugin>
+
+  </model>
+</sdf>

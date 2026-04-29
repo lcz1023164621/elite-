@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="夹吸组合夹具">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="-0.031839 -0.034389 -0.0001064"
+        rpy="0 0 0" />
+      <mass
+        value="0.066436" />
+      <inertia
+        ixx="9.1321E-05"
+        ixy="-1.8862E-20"
+        ixz="5.2472E-09"
+        iyy="4.0647E-05"
+        iyz="-1.9611E-19"
+        izz="5.2147E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://夹吸组合夹具/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.75294 0.75294 0.75294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://夹吸组合夹具/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+</robot>

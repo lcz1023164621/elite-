@@ -1,0 +1,10 @@
+moveit_setup_assistant_config:
+  urdf:
+    package: elite_description
+    relative_path: urdf/ec612_description.urdf
+  srdf:
+    relative_path: config/ec612.srdf
+  package_settings:
+    author_name: kang.jiang
+    author_email: jiangkang@elibot.cn
+    generated_timestamp: 1724402766

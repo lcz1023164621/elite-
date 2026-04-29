@@ -1,0 +1,5 @@
+# Service to load task or configure
+string filename
+---
+string answer
+bool success

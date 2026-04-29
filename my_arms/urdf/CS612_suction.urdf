@@ -1,0 +1,52 @@
+  <!-- 吸盘末端工具：按 img/33、img/34 的结构近似 -->
+  <link name="suction_cup_link">
+    <inertial>
+      <origin xyz="0 0 0.015" rpy="0 0 0" />
+      <mass value="0.08" />
+      <inertia ixx="4.0E-05" ixy="0" ixz="0" iyy="4.0E-05" iyz="0" izz="5.0E-05" />
+    </inertial>
+    <visual name="thread_stub">
+      <origin xyz="0 0 0.0045" rpy="0 0 0" />
+      <geometry><cylinder length="0.009" radius="0.011" /></geometry>
+      <material name="adapter_metal"><color rgba="0.78 0.78 0.80 1" /></material>
+    </visual>
+    <visual name="adapter_body">
+      <origin xyz="0 0 0.0115" rpy="0 0 0" />
+      <geometry><cylinder length="0.009" radius="0.024" /></geometry>
+      <material name="adapter_metal"><color rgba="0.75 0.75 0.77 1" /></material>
+    </visual>
+    <visual name="bellows_upper">
+      <origin xyz="0 0 0.0165" rpy="0 0 0" />
+      <geometry><cylinder length="0.007" radius="0.040" /></geometry>
+      <material name="bellows_green"><color rgba="0.22 0.80 0.36 0.95" /></material>
+    </visual>
+    <visual name="bellows_lower">
+      <origin xyz="0 0 0.0215" rpy="0 0 0" />
+      <geometry><cylinder length="0.007" radius="0.039" /></geometry>
+      <material name="bellows_green"><color rgba="0.22 0.80 0.36 0.95" /></material>
+    </visual>
+    <visual name="support_ring">
+      <origin xyz="0 0 0.0175" rpy="0 0 0" />
+      <geometry><cylinder length="0.004" radius="0.034" /></geometry>
+      <material name="ring_green"><color rgba="0.18 0.70 0.30 1.0" /></material>
+    </visual>
+    <visual name="rubber_lip">
+      <origin xyz="0 0 0.020" rpy="0 0 0" />
+      <geometry><cylinder length="0.008" radius="0.046" /></geometry>
+      <material name="lip_rubber"><color rgba="0.88 0.18 0.18 0.95" /></material>
+    </visual>
+    <collision name="suction_body_collision">
+      <origin xyz="0 0 0.0165" rpy="0 0 0" />
+      <geometry><cylinder length="0.017" radius="0.039" /></geometry>
+    </collision>
+    <collision name="suction_lip_collision">
+      <origin xyz="0 0 0.020" rpy="0 0 0" />
+      <geometry><cylinder length="0.008" radius="0.046" /></geometry>
+    </collision>
+  </link>
+
+  <joint name="joint_suction_cup" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="link6" />
+    <child link="suction_cup_link" />
+  </joint>

@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+from cs612_moveit_config.trajectory_action_bridge import main
+
+if __name__ == "__main__":
+    main()

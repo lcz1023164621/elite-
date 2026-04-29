@@ -1,0 +1,4 @@
+string address
+uint16 value
+---
+bool result

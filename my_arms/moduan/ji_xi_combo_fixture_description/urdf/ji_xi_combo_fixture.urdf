@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<robot name="ji_xi_combo_fixture">
+  <!--
+    Auto-generated from STEP using a convex-hull approximation.
+    Notes:
+    1) STEP -> exact URDF mesh conversion was not available in this environment.
+    2) The visual/collision mesh below is a convex hull reconstructed from STEP point data.
+    3) CAD units were interpreted as millimeters and converted to meters.
+    4) The link frame is kept at the original CAD frame.
+    5) Mass/inertia are placeholders and should be adjusted before real dynamics use.
+  -->
+
+  <link name="ji_xi_combo_fixture_link">
+    <inertial>
+      <origin xyz="0.097102 -0.011647 0.044556" rpy="0 0 0"/>
+      <mass value="1.000000"/>
+      <inertia ixx="0.005016818" ixy="0.000000000" ixz="0.000000000"
+               iyy="0.025541153" iyz="0.000000000" izz="0.022724265"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://ji_xi_combo_fixture_description/meshes/ji_xi_combo_fixture_convex_hull.stl"/>
+      </geometry>
+      <material name="silver">
+        <color rgba="0.80 0.80 0.80 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://ji_xi_combo_fixture_description/meshes/ji_xi_combo_fixture_convex_hull.stl"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

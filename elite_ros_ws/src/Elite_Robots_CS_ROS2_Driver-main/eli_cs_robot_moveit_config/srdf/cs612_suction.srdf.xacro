@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro">
+  <!--
+    CS612 with suction cup end-effector SRDF.
+    Extends the official cs_macro with suction_cup and TCP links.
+  -->
+  <xacro:include filename="$(find eli_cs_robot_moveit_config)/srdf/cs.srdf.xacro" />
+
+  <xacro:cs_srdf name="cs612" prefix="" />
+
+  <!-- Additional end-effector group: suction TCP -->
+  <group name="suction_end_effector">
+    <link name="suction_tcp_link" />
+  </group>
+
+  <!-- Extend manipulator chain to suction_tcp instead of tool0 -->
+  <group name="cs_manipulator_suction">
+    <chain base_link="base_link" tip_link="suction_tcp_link" />
+  </group>
+
+  <!-- End effector definition -->
+  <end_effector name="suction" parent_link="suction_tcp_link" group="suction_end_effector" parent_group="cs612_manipulator" />
+
+  <!-- Disable collision for suction cup links -->
+  <disable_collisions link1="suction_cup_link" link2="wrist_3_link" reason="Adjacent" />
+  <disable_collisions link1="suction_cup_link" link2="wrist_2_link" reason="Never" />
+  <disable_collisions link1="suction_cup_link" link2="wrist_1_link" reason="Never" />
+  <disable_collisions link1="suction_tcp_link" link2="suction_cup_link" reason="Adjacent" />
+  <disable_collisions link1="suction_tcp_link" link2="wrist_3_link" reason="Never" />
+  <disable_collisions link1="suction_tcp_link" link2="wrist_2_link" reason="Never" />
+  <disable_collisions link1="suction_tcp_link" link2="wrist_1_link" reason="Never" />
+
+  <!-- Home position with suction (same as "up" pose for upright orientation) -->
+  <group_state name="home_suction" group="cs612_manipulator">
+    <joint name="shoulder_pan_joint" value="0" />
+    <joint name="shoulder_lift_joint" value="-1.5708" />
+    <joint name="elbow_joint" value="0" />
+    <joint name="wrist_1_joint" value="-1.5708" />
+    <joint name="wrist_2_joint" value="0" />
+    <joint name="wrist_3_joint" value="0" />
+  </group_state>
+
+</robot>

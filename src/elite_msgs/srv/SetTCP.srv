@@ -1,0 +1,10 @@
+uint16 index
+uint16 unit_type
+float32 offset_x
+float32 offset_y
+float32 offset_z
+float32 rx
+float32 ry
+float32 rz
+---
+bool result

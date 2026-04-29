@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="cs612">
+  <!-- Manipulator group ends at suction_tcp_link so MoveIt and the EE agree on the TCP. -->
+  <group name="cs_manipulator">
+    <chain base_link="base_link" tip_link="suction_tcp_link" />
+  </group>
+
+  <!-- Suction end-effector group -->
+  <group name="suction_end_effector">
+    <link name="suction_tcp_link" />
+  </group>
+
+  <!-- Named states -->
+  <group_state name="Home" group="cs_manipulator">
+    <joint name="shoulder_pan_joint" value="0" />
+    <joint name="shoulder_lift_joint" value="-1.5708" />
+    <joint name="elbow_joint" value="0" />
+    <joint name="wrist_1_joint" value="-1.5708" />
+    <joint name="wrist_2_joint" value="0" />
+    <joint name="wrist_3_joint" value="0" />
+  </group_state>
+
+  <group_state name="Zero" group="cs_manipulator">
+    <joint name="shoulder_pan_joint" value="0" />
+    <joint name="shoulder_lift_joint" value="0" />
+    <joint name="elbow_joint" value="0" />
+    <joint name="wrist_1_joint" value="0" />
+    <joint name="wrist_2_joint" value="0" />
+    <joint name="wrist_3_joint" value="0" />
+  </group_state>
+
+  <!-- End effector -->
+  <end_effector name="suction" parent_link="suction_tcp_link" group="suction_end_effector" parent_group="cs_manipulator" />
+
+  <!-- Disable collisions (adjacent + never-touch pairs) -->
+  <disable_collisions link1="base_link" link2="base_link_inertia" reason="Adjacent" />
+  <disable_collisions link1="base_link" link2="shoulder_link" reason="Never" />
+  <disable_collisions link1="base_link_inertia" link2="shoulder_link" reason="Adjacent" />
+  <disable_collisions link1="base_link" link2="upperarm_link" reason="Never" />
+  <disable_collisions link1="base_link" link2="wrist_1_link" reason="Never" />
+  <disable_collisions link1="base_link_inertia" link2="upperarm_link" reason="Never" />
+  <disable_collisions link1="base_link_inertia" link2="wrist_1_link" reason="Never" />
+  <disable_collisions link1="shoulder_link" link2="upperarm_link" reason="Adjacent" />
+  <disable_collisions link1="shoulder_link" link2="forearm_link" reason="Never" />
+  <disable_collisions link1="shoulder_link" link2="wrist_1_link" reason="Never" />
+  <disable_collisions link1="shoulder_link" link2="wrist_2_link" reason="Never" />
+  <disable_collisions link1="upperarm_link" link2="forearm_link" reason="Adjacent" />
+  <disable_collisions link1="upperarm_link" link2="wrist_1_link" reason="Never" />
+  <disable_collisions link1="forearm_link" link2="wrist_1_link" reason="Adjacent" />
+  <disable_collisions link1="wrist_1_link" link2="wrist_2_link" reason="Adjacent" />
+  <disable_collisions link1="wrist_1_link" link2="wrist_3_link" reason="Never" />
+  <disable_collisions link1="wrist_2_link" link2="wrist_3_link" reason="Adjacent" />
+  <disable_collisions link1="tool0" link2="wrist_1_link" reason="Never" />
+  <disable_collisions link1="tool0" link2="wrist_2_link" reason="Never" />
+  <disable_collisions link1="tool0" link2="wrist_3_link" reason="Adjacent" />
+  <!-- Suction cup additional collision exclusions -->
+  <disable_collisions link1="suction_cup_link" link2="wrist_3_link" reason="Adjacent" />
+  <disable_collisions link1="suction_cup_link" link2="wrist_2_link" reason="Never" />
+  <disable_collisions link1="suction_cup_link" link2="wrist_1_link" reason="Never" />
+  <disable_collisions link1="suction_tcp_link" link2="suction_cup_link" reason="Adjacent" />
+  <disable_collisions link1="suction_tcp_link" link2="wrist_3_link" reason="Never" />
+  <disable_collisions link1="suction_tcp_link" link2="wrist_2_link" reason="Never" />
+  <disable_collisions link1="suction_tcp_link" link2="wrist_1_link" reason="Never" />
+</robot>

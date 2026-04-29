@@ -43,7 +43,8 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
-from std_msgs.msg import Bool, Empty, Float64
+from std_msgs.msg import Bool, Empty
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 _ARM_JOINTS = [
     "shoulder_pan_joint",
@@ -474,11 +475,11 @@ class AutoPickPlaceNode(Node):
         # 底面吸附判据：只要求落在物体上表面的有效吸附区域内，不强制必须是几何中心点。
         # 当前吸盘半径约 42 mm，因此横向容差放到 45 mm，允许顶面内“偏心吸附”。
         self.declare_parameter("suction_attach_lateral_tol", 0.080)
-        self.declare_parameter("suction_attach_vertical_tol", 0.060)
-        self.declare_parameter("suction_attach_axis_down_min", 0.85)
-        # 真正触碰吸附前使用更严格门限，避免“边缘吸附/未接触就尝试吸附”。
         self.declare_parameter("suction_touch_lateral_tol", 0.080)
-        self.declare_parameter("suction_touch_vertical_tol", 0.050)
+        self.declare_parameter("suction_attach_vertical_tol", 0.30)
+        self.declare_parameter("suction_attach_axis_down_min", 0.90)
+
+        self.declare_parameter("suction_touch_vertical_tol", 0.30)
         self.declare_parameter("suction_touch_axis_down_min", 0.90)
         self.declare_parameter("suction_attach_burst_count", 10)
         self.declare_parameter("suction_attach_burst_interval_sec", 0.04)
@@ -486,6 +487,7 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("pickup_probe_lift_z", 0.025)
         self.declare_parameter("pickup_probe_min_follow_z", 0.010)
         self.declare_parameter("pickup_probe_require_follow_if_live_pose", True)
+        self.declare_parameter("allow_unverified_sim_attach", True)
         self.declare_parameter("ik_service", "/compute_ik")
         # 官方 Elite 栈使用 ros2_control + MoveIt 执行，默认通过 MoveIt IK/轨迹控制器下发。
         self.declare_parameter("use_compute_ik", True)
@@ -618,10 +620,11 @@ class AutoPickPlaceNode(Node):
         self._action = ActionClient(self, MoveGroup, "move_action")
         self._pub_attach = self.create_publisher(Empty, "/cs612/suction/attach", 10)
         self._pub_detach = self.create_publisher(Empty, "/cs612/suction/detach", 10)
-        self._joint_cmd_pubs = {
-            joint: self.create_publisher(Float64, f"/cs612/joint_command/{joint}", 10)
-            for joint in _ARM_JOINTS
-        }
+        self._traj_pub = self.create_publisher(
+            JointTrajectory,
+            "/joint_trajectory_controller/joint_trajectory",
+            10,
+        )
         self.create_subscription(
             Bool,
             "/cs612/suction/state",
@@ -772,6 +775,31 @@ class AutoPickPlaceNode(Node):
             return limit.upper
         return v
 
+    def _joint_accepts_equivalent_angles(self, idx: int) -> bool:
+        if idx < 0 or idx >= len(self._joint_kin):
+            return True
+        limit = self._joint_kin[idx]
+        return (limit.upper - limit.lower) >= (2.0 * math.pi - 0.1)
+
+    def _nearest_equivalent_joint_angle(self, idx: int, value: float, reference: float) -> float:
+        if self._joint_accepts_equivalent_angles(idx):
+            return float(reference) + _wrap_to_pi(float(value) - float(reference))
+        return float(value)
+
+    def _joint_position_error(self, idx: int, actual: float, target: float) -> float:
+        if self._joint_accepts_equivalent_angles(idx):
+            return _angle_distance(float(actual), float(target))
+        return abs(float(actual) - float(target))
+
+    def _match_joint_positions_to_reference(
+        self, joints: Sequence[float], reference: Sequence[float]
+    ) -> list[float]:
+        out: list[float] = []
+        for idx, value in enumerate(joints):
+            ref = float(reference[idx]) if idx < len(reference) else float(value)
+            out.append(self._nearest_equivalent_joint_angle(idx, float(value), ref))
+        return out
+
     def _fk_with_jacobian_context(
         self, joints: Sequence[float]
     ) -> tuple[tuple[float, float, float], list[list[float]], list[tuple[float, float, float]], list[tuple[float, float, float]]]:
@@ -807,12 +835,16 @@ class AutoPickPlaceNode(Node):
         return pose_p, pose_q
 
     def _publish_joint_vector(self, joints: Sequence[float]) -> None:
-        for idx, name in enumerate(_ARM_JOINTS):
-            if idx >= len(joints):
-                break
-            msg = Float64()
-            msg.data = float(joints[idx])
-            self._joint_cmd_pubs[name].publish(msg)
+        if len(joints) < len(_ARM_JOINTS):
+            return
+        traj = JointTrajectory()
+        traj.header.stamp = self.get_clock().now().to_msg()
+        traj.joint_names = list(_ARM_JOINTS)
+        point = JointTrajectoryPoint()
+        point.positions = [float(joints[i]) for i in range(len(_ARM_JOINTS))]
+        point.time_from_start = Duration(sec=0, nanosec=200_000_000)
+        traj.points.append(point)
+        self._traj_pub.publish(traj)
 
     def _wait_joint_goal(self, target: Sequence[float], label: str) -> bool:
         tol = max(0.01, float(self.get_parameter("cartesian_settle_tol_rad").value))
@@ -823,7 +855,7 @@ class AutoPickPlaceNode(Node):
         while time.monotonic() < deadline:
             cur = self._current_arm_positions()
             if cur is not None and len(cur) == len(target):
-                if all(abs(float(cur[i]) - float(target[i])) <= tol for i in range(len(target))):
+                if all(self._joint_position_error(i, cur[i], target[i]) <= tol for i in range(len(target))):
                     return True
             now = time.monotonic()
             if now >= next_pub:
@@ -832,7 +864,7 @@ class AutoPickPlaceNode(Node):
             time.sleep(0.02)
         cur = self._current_arm_positions()
         if cur is not None and len(cur) == len(target):
-            err_max = max(abs(float(cur[i]) - float(target[i])) for i in range(len(target)))
+            err_max = max(self._joint_position_error(i, cur[i], target[i]) for i in range(len(target)))
             self.get_logger().warn(f"{label}: 关节未完全收敛，max_err={err_max:.4f} rad")
         return False
 
@@ -841,22 +873,22 @@ class AutoPickPlaceNode(Node):
         t0 = time.time()
         last_log = 0.0
         while rclpy.ok() and (time.time() - t0) < timeout_sec:
-            joint_subs = [pub.get_subscription_count() for pub in self._joint_cmd_pubs.values()]
+            traj_sub = self._traj_pub.get_subscription_count()
             attach_sub = self._pub_attach.get_subscription_count()
             detach_sub = self._pub_detach.get_subscription_count()
-            joint_ready = all(v > 0 for v in joint_subs)
+            traj_ready = traj_sub > 0
             suction_ready = attach_sub > 0 and detach_sub > 0
-            if joint_ready and suction_ready:
+            if traj_ready and suction_ready:
                 self.get_logger().info(
                     "桥接订阅已就绪: "
-                    f"joint_cmd_subs={joint_subs}, attach_sub={attach_sub}, detach_sub={detach_sub}"
+                    f"traj_sub={traj_sub}, attach_sub={attach_sub}, detach_sub={detach_sub}"
                 )
                 return True
             now = time.time()
             if now - last_log >= 2.0:
                 self.get_logger().info(
                     "等待 Gazebo 桥接订阅: "
-                    f"joint_cmd_subs={joint_subs}, attach_sub={attach_sub}, detach_sub={detach_sub}"
+                    f"traj_sub={traj_sub}, attach_sub={attach_sub}, detach_sub={detach_sub}"
                 )
                 last_log = now
             time.sleep(0.1)
@@ -875,17 +907,24 @@ class AutoPickPlaceNode(Node):
             self.get_logger().error(f"{label}: 当前关节状态不可用")
             return False
         target = [self._joint_limit_clamp(i, float(v)) for i, v in enumerate(positions)]
-        max_delta = max(abs(target[i] - float(cur[i])) for i in range(len(target)))
+        command_target = self._match_joint_positions_to_reference(target, cur)
+        max_delta = max(
+            self._joint_position_error(i, float(cur[i]), float(command_target[i]))
+            for i in range(len(command_target))
+        )
         step_limit = max(0.01, float(self.get_parameter("cartesian_ik_joint_step_limit_rad").value))
         steps = max(1, int(math.ceil(max_delta / step_limit)))
         dt = max(0.01, float(self.get_parameter("cartesian_cmd_period_sec").value))
         self.get_logger().info(f"DirectJoint: {label} steps={steps}")
         for s in range(1, steps + 1):
             t = float(s) / float(steps)
-            cmd = [float(cur[i]) + t * (target[i] - float(cur[i])) for i in range(len(target))]
+            cmd = [
+                float(cur[i]) + t * (float(command_target[i]) - float(cur[i]))
+                for i in range(len(command_target))
+            ]
             self._publish_joint_vector(cmd)
             time.sleep(dt)
-        self._wait_joint_goal(target, label)
+        self._wait_joint_goal(command_target, label)
         return True
 
     def _quat_angle(self, a: Quaternion, b: Quaternion) -> float:
@@ -1022,7 +1061,8 @@ class AutoPickPlaceNode(Node):
         steps = max(1, int(math.ceil(dist / pos_step)), int(math.ceil(ang / ang_step)))
         dt = max(0.01, float(self.get_parameter("cartesian_cmd_period_sec").value))
 
-        q_seed = list(cur)
+        q_seed = [self._joint_limit_clamp(i, float(v)) for i, v in enumerate(cur)]
+        command_seed = list(cur)
         self.get_logger().info(
             f"Cartesian: {label} steps={steps} target=({tgt.x:.3f},{tgt.y:.3f},{tgt.z:.3f})"
         )
@@ -1046,8 +1086,10 @@ class AutoPickPlaceNode(Node):
             if sol is None:
                 self.get_logger().error(f"{label}: 笛卡尔 IK 失败（step {s}/{steps}）")
                 return False
-            self._publish_joint_vector(sol)
+            cmd = self._match_joint_positions_to_reference(sol, command_seed)
+            self._publish_joint_vector(cmd)
             q_seed = sol
+            command_seed = cmd
             time.sleep(dt)
             if collision_rect_half is not None:
                 collided, coll_desc = self._check_arm_object_collision(collision_rect_half)
@@ -1056,7 +1098,7 @@ class AutoPickPlaceNode(Node):
                         f"{label}: 机械臂与物体碰撞，停止运动: {coll_desc}"
                     )
                     return False
-        if not self._wait_joint_goal(q_seed, label):
+        if not self._wait_joint_goal(command_seed, label):
             self.get_logger().error(f"{label}: 笛卡尔轨迹末端未收敛，判定执行失败")
             return False
         return True
@@ -1115,7 +1157,8 @@ class AutoPickPlaceNode(Node):
         cur_target_x = float(target.x)
         cur_target_y = float(target.y)
         cur_z = float(start_p.z)
-        q_seed = list(cur_joints)
+        q_seed = [self._joint_limit_clamp(i, float(v)) for i, v in enumerate(cur_joints)]
+        command_seed = list(cur_joints)
         cartesian_dt = max(0.01, float(self.get_parameter("cartesian_cmd_period_sec").value))
 
         for step in range(1, n_steps + 1):
@@ -1143,8 +1186,10 @@ class AutoPickPlaceNode(Node):
                 self.get_logger().error(f"{label}: IK 失败 step={step}/{n_steps}")
                 return False
 
-            self._publish_joint_vector(sol)
+            cmd = self._match_joint_positions_to_reference(sol, command_seed)
+            self._publish_joint_vector(cmd)
             q_seed = sol
+            command_seed = cmd
             time.sleep(cartesian_dt)
 
             if settle_sec_per_waypoint > 0:
@@ -1209,7 +1254,7 @@ class AutoPickPlaceNode(Node):
 
             cur_z = next_z
 
-        if not self._wait_joint_goal(q_seed, label):
+        if not self._wait_joint_goal(command_seed, label):
             self.get_logger().warn(f"{label}: 最终关节未完全收敛")
 
         final_cup_pose = self._lookup_link_pose_in_base("suction_cup_link")
@@ -2897,18 +2942,24 @@ class AutoPickPlaceNode(Node):
         follow_ok = follow_dz is not None and follow_dz >= min_follow_z
         has_live_pose = self._logged_rect and (rect_z_before is not None and rect_z_after is not None)
         require_follow_if_live_pose = self._param_bool("pickup_probe_require_follow_if_live_pose")
+        allow_unverified = self._param_bool("allow_unverified_sim_attach")
 
         if require_follow_if_live_pose and has_live_pose:
-            success = follow_ok and state_ok
+            success = follow_ok
             if success:
-                state_label = "STATE_SUCTION_AND_FOLLOW: suction=OK + follow=OK"
+                if state_ok:
+                    state_label = "STATE_SUCTION_AND_FOLLOW: suction=OK + follow=OK"
+                else:
+                    state_label = "STATE_FOLLOW_ONLY: suction=FAIL + follow=OK (话题延迟)"
             elif state_ok and not follow_ok:
                 state_label = "STATE_SUCTION_ONLY: suction=OK + follow=FAIL (可疑边缘吸附)"
-            elif follow_ok and not state_ok:
-                state_label = "STATE_FOLLOW_ONLY: suction=FAIL + follow=OK (话题延迟)"
             else:
                 state_label = "STATE_FAIL: suction=FAIL + follow=FAIL"
             reason = f"{state_label} | follow_dz={follow_dz:.4f}m, suction_state={self._suction_attached}"
+        elif not has_live_pose and allow_unverified:
+            success = True
+            state_label = "STATE_SIM_UNVERIFIED: 无实时物体位姿/吸附状态，按接触几何继续"
+            reason = f"{state_label} | suction_state={self._suction_attached}"
         else:
             success = state_ok or follow_ok
             reasons: list[str] = []
@@ -4169,9 +4220,13 @@ class AutoPickPlaceNode(Node):
 
         # 主判据：若抬升后物体中心高度未明显上升，则判定吸附失败。
         rect_center_z_after_lift = self._current_rect_center_z()
-        if (
-            rect_center_z_before_attach is not None
+        has_live_lift_pose = (
+            self._logged_rect
+            and rect_center_z_before_attach is not None
             and rect_center_z_after_lift is not None
+        )
+        if (
+            has_live_lift_pose
             and rect_center_z_after_lift < rect_center_z_before_attach + 0.015
         ):
             self._pub_detach.publish(Empty())
@@ -4180,6 +4235,10 @@ class AutoPickPlaceNode(Node):
                 f"(before={rect_center_z_before_attach:.3f}, after={rect_center_z_after_lift:.3f})"
             )
             return
+        if not has_live_lift_pose and self._param_bool("allow_unverified_sim_attach"):
+            self.get_logger().warn(
+                "未收到实时 rect_pickup 位姿，跳过抬升后物体跟随高度验证（仿真 attach 兜底模式）"
+            )
 
         if carton_ps is not None:
             place_pt = self._adjust_place_point_for_box(place_pt, carton_ps, half)

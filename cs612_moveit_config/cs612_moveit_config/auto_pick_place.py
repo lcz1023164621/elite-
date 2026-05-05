@@ -464,6 +464,13 @@ def _suction_down_quat(yaw: float) -> Quaternion:
     return _quat_mul(_quat_from_rpy(0.0, 0.0, yaw), _quat_from_rpy(math.pi, 0.0, 0.0))
 
 
+def _flat_yaw_quat_from_tool_orientation(tool_q: Quaternion) -> Quaternion:
+    """把吸盘 TCP 的平面 yaw 转成物体放平在世界 Z 轴上的姿态。"""
+    x_axis = _quat_rotate_vec(tool_q, 1.0, 0.0, 0.0)
+    yaw = math.atan2(float(x_axis[1]), float(x_axis[0]))
+    return _quat_from_rpy(0.0, 0.0, yaw)
+
+
 def _wrap_to_pi(angle: float) -> float:
     while angle > math.pi:
         angle -= 2.0 * math.pi
@@ -813,6 +820,7 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("pre_pick_try_clearances", [0.10, 0.14, 0.18, 0.24])
         self.declare_parameter("pick_posture_hint", [0.0, -1.25, 1.25, -1.60, 1.57, 0.0])
         self.declare_parameter("place_posture_hint", [0.0, -0.90, 1.10, -1.55, 1.57, 0.0])
+        self.declare_parameter("post_place_stow_joints", [0.0, -1.57, 0.0, -1.57, 1.57, 0.0])
         self.declare_parameter("move_to_start_face_pose", False)
         self.declare_parameter("start_face_posture_hint", [0.0, -1.57, 0.0, -1.57, 1.57, 0.0])
         # 默认按“物体+箱子中点方向”自动朝向；若关闭则使用 start_face_joint1_rad。
@@ -2239,7 +2247,7 @@ class AutoPickPlaceNode(Node):
         pose.position.x = cup_bottom.x
         pose.position.y = cup_bottom.y
         pose.position.z = max(half_z, cup_bottom.z - half_z + touch_dz)
-        pose.orientation.w = 1.0
+        pose.orientation = _flat_yaw_quat_from_tool_orientation(cup_pose.orientation)
         return pose
 
     def _set_rect_pose(self, pose: Pose, wait_sec: float = 0.15, log_timeout: bool = False) -> bool:
@@ -2404,6 +2412,60 @@ class AutoPickPlaceNode(Node):
                 return True
             time.sleep(0.12)
         self.get_logger().warn(f"{label}: 最终中心/姿态对齐 SetEntityPose 失败")
+        return False
+
+    def _planned_rect_pose_at_place(
+        self,
+        place_tcp: Point,
+        place_orientation: Quaternion,
+        half_sizes: Sequence[float],
+    ) -> Pose:
+        half_z = max(0.001, float(half_sizes[2]) if len(half_sizes) >= 3 else 0.04)
+        suction_contact_offset = float(self.get_parameter("suction_contact_offset_z").value)
+        touch_dz = max(0.0, float(self.get_parameter("touch_delta_z").value))
+        contact = self._point_with_local_offset(
+            place_tcp,
+            place_orientation,
+            0.0,
+            0.0,
+            suction_contact_offset,
+        )
+        pose = Pose()
+        pose.position.x = contact.x
+        pose.position.y = contact.y
+        pose.position.z = max(half_z, contact.z - half_z + touch_dz)
+        pose.orientation = _flat_yaw_quat_from_tool_orientation(place_orientation)
+        return pose
+
+    def _release_rect_at_planned_place(
+        self,
+        place_tcp: Point,
+        place_orientation: Quaternion,
+        half_sizes: Sequence[float],
+        label: str = "place_release_planned",
+    ) -> bool:
+        final_pose = self._planned_rect_pose_at_place(place_tcp, place_orientation, half_sizes)
+        self._suction_attached = None
+        self._stop_fake_attach(label)
+        self._pub_detach.publish(Empty())
+        if not self._wait_suction_state(False, 0.7) and self._suction_attached is True:
+            self._detach_via_gz_cli(repeats=1)
+        self._suction_attached = False
+        self._publish_assumed_state(False)
+
+        for i in range(3):
+            if self._set_rect_pose(final_pose, wait_sec=0.5, log_timeout=(i == 2)):
+                self._rect_pose_can_move = True
+                self._apply_released_rect_collision_scene(final_pose, half_sizes)
+                self.get_logger().info(
+                    f"{label}: 已按规划放置位姿释放 rect_pickup "
+                    f"({final_pose.position.x:.3f}, {final_pose.position.y:.3f}, {final_pose.position.z:.3f}), "
+                    f"q=({final_pose.orientation.x:.4f},{final_pose.orientation.y:.4f},"
+                    f"{final_pose.orientation.z:.4f},{final_pose.orientation.w:.4f})"
+                )
+                return True
+            time.sleep(0.12)
+        self.get_logger().warn(f"{label}: 规划放置位姿 SetEntityPose 失败")
         return False
 
     def _apply_released_rect_collision_scene(
@@ -4814,14 +4876,14 @@ class AutoPickPlaceNode(Node):
         base_place_yaw = _wrap_to_pi(place_world_yaw + yaw_offset)
         yaw_delta_set = [0.0, 0.06, -0.06]
         pick_yaw_set = [_wrap_to_pi(base_pick_yaw + d) for d in yaw_delta_set]
-        place_yaw_set = [_wrap_to_pi(base_place_yaw + d) for d in yaw_delta_set]
         # 当前吸盘接触面定义为本地 +Z，抓取/放置时必须显式令其朝世界 -Z。
         # 否则 IK 会为了保持“吸盘朝上”的错误目标姿态而落到趴地/绕腕分支。
         pre_pick_orientations = [_suction_down_quat(base_pick_yaw)]
         # 接触与吸附阶段固定使用同一“吸盘朝下”姿态，优先保证 TCP 位于顶面正上方。
         pick_touch_orientations = [_suction_down_quat(base_pick_yaw)]
-        # 放置阶段保留少量 yaw 余量，但保持吸盘始终朝下。
-        place_orientations = [_suction_down_quat(yaw) for yaw in place_yaw_set]
+        # 放置阶段的 yaw 在入箱前一次确定；下放和释放都使用同一姿态。
+        planned_place_orientation = _suction_down_quat(base_place_yaw)
+        place_orientations = [planned_place_orientation]
 
         # 防止 DetachableJoint 初始误附着：流程开始先强制 detach 清状态。
         if not self._ensure_detached():
@@ -5331,7 +5393,12 @@ class AutoPickPlaceNode(Node):
             self.get_logger().warn("place_inside 失败，将在箱口上方释放")
 
         self.get_logger().info("释放 detach")
-        self._release_and_center_rect_in_carton(carton_ps, half, "place_release_center")
+        self._release_rect_at_planned_place(
+            place_inside_used,
+            planned_place_orientation,
+            half,
+            "place_release_planned",
+        )
         time.sleep(0.2)
         self._set_pick_contact_collision_allowed(True)
 
@@ -5353,14 +5420,19 @@ class AutoPickPlaceNode(Node):
 
         self._refresh_joint_state(1.0)
         self._set_motion_profile("default")
+        stow_joints = list(self.get_parameter("post_place_stow_joints").value)
+        if len(stow_joints) != 6:
+            self.get_logger().warn("post_place_stow_joints 参数非法，回退到默认低姿态")
+            stow_joints = [0.0, -1.57, 0.0, -1.57, 1.57, 0.0]
+        stow_joints = [float(v) for v in stow_joints]
         if not self._run_stage(
             StageName.HOME,
-            lambda: self._send_move([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "home"),
-            "home 首次失败",
+            lambda: self._send_move(stow_joints, "post_place_stow"),
+            "post_place_stow 首次失败",
         ):
-            self.get_logger().warn("home 首次失败，刷新状态后重试一次")
+            self.get_logger().warn("post_place_stow 首次失败，刷新状态后重试一次")
             self._refresh_joint_state(1.5)
-            self._send_move([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "home_retry")
+            self._send_move(stow_joints, "post_place_stow_retry")
 
     def _refresh_joint_state(self, timeout_sec: float) -> None:
         t0 = time.time()

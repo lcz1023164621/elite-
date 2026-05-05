@@ -119,17 +119,31 @@
     <child link="$(arg prefix)suction_cup_link" />
   </joint>
 
-  <link name="$(arg prefix)suction_tcp_link" />
+  <gazebo reference="$(arg prefix)wrist_3-suction_cup">
+    <preserveFixedJoint>true</preserveFixedJoint>
+  </gazebo>
+
+  <link name="$(arg prefix)suction_tcp_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.001" />
+      <inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7" />
+    </inertial>
+  </link>
   <joint name="$(arg prefix)suction_cup-tcp" type="fixed">
     <origin xyz="0 0 $(arg suction_tcp_offset_z)" rpy="0 0 0" />
     <parent link="$(arg prefix)suction_cup_link" />
     <child link="$(arg prefix)suction_tcp_link" />
   </joint>
 
+  <gazebo reference="$(arg prefix)suction_cup-tcp">
+    <preserveFixedJoint>false</preserveFixedJoint>
+  </gazebo>
+
   <gazebo>
     <plugin filename="ignition-gazebo-detachable-joint-system"
             name="ignition::gazebo::systems::DetachableJoint">
-      <parent_link>$(arg prefix)wrist_3_link</parent_link>
+      <parent_link>$(arg prefix)suction_cup_link</parent_link>
       <child_model>rect_pickup</child_model>
       <child_link>box_link</child_link>
       <attach_topic>/cs612/suction/attach</attach_topic>

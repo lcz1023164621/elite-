@@ -26,6 +26,36 @@ _ARM_JOINTS = [
 ]
 _DEBUG_LOG_PATH = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-cfd510.log")
 _DEBUG_SESSION_ID = "cfd510"
+_AGENT_9009e8_ID = "9009e8"
+# 与 auto_pick_place._IDE_CURSOR_MIRROR_LOG 一致：便于对照 launch 子进程与 Cursor 工作区是否同一挂载
+_IDE_CURSOR_AGENT_LOG = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-9009e8.log")
+
+
+def _debug_log_9009e8_bridge(project_root: Path, data: dict) -> None:
+    """由 launch 进程写入（与 _debug_log 同源），用于验证 IDE 侧能否看到 debug-9009e8.log（H_sync）。"""
+    payload = {
+        "sessionId": _AGENT_9009e8_ID,
+        "runId": "pre-fix",
+        "hypothesisId": "H_bridge",
+        "location": "bringup.launch.py:_launch_setup",
+        "message": "bringup_workspace_bridge",
+        "data": {"project_root": str(project_root.resolve()), **data},
+        "timestamp": int(time.time() * 1000),
+    }
+    line = json.dumps(payload, ensure_ascii=True) + "\n"
+    paths = [project_root / ".cursor" / "debug-9009e8.log", _IDE_CURSOR_AGENT_LOG]
+    seen: set[str] = set()
+    for p in paths:
+        try:
+            key = str(p.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
 
 
 def _debug_log(location: str, message: str, hypothesis_id: str, data: dict) -> None:
@@ -76,6 +106,7 @@ def _launch_setup(context, *args, **kwargs):
     use_sim_time = LaunchConfiguration("use_sim_time")
     launch_rviz = LaunchConfiguration("launch_rviz")
     auto_pick = LaunchConfiguration("auto_pick")
+    auto_pick_delay_sec = LaunchConfiguration("auto_pick_delay_sec")
     launch_gz_gui = LaunchConfiguration("launch_gz_gui")
     rviz_config_arg = LaunchConfiguration("rviz_config")
     helper_modules = {
@@ -125,6 +156,17 @@ def _launch_setup(context, *args, **kwargs):
             "world_file_exists": world_file.is_file(),
         },
     )
+    try:
+        _ap_delay_bridge = float(auto_pick_delay_sec.perform(context))
+    except (ValueError, TypeError):
+        _ap_delay_bridge = 25.0
+    _debug_log_9009e8_bridge(
+        project_root,
+        {
+            "auto_pick": auto_pick.perform(context),
+            "auto_pick_delay_sec": _ap_delay_bridge,
+        },
+    )
     # #endregion
 
     gz_launch = IncludeLaunchDescription(
@@ -153,13 +195,33 @@ def _launch_setup(context, *args, **kwargs):
     joint_state_broadcaster = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"],
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager",
+            "/controller_manager",
+            "--controller-manager-timeout",
+            "60",
+            "--service-call-timeout",
+            "20",
+            "--switch-timeout",
+            "20",
+        ],
         output="screen",
     )
     joint_trajectory_controller = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_trajectory_controller", "--controller-manager", "/controller_manager"],
+        arguments=[
+            "joint_trajectory_controller",
+            "--controller-manager",
+            "/controller_manager",
+            "--controller-manager-timeout",
+            "60",
+            "--service-call-timeout",
+            "20",
+            "--switch-timeout",
+            "20",
+        ],
         output="screen",
     )
 
@@ -228,7 +290,13 @@ def _launch_setup(context, *args, **kwargs):
         condition=IfCondition(launch_rviz),
     )
 
+    _ap_ndjson = str((project_root / ".cursor" / "debug-9009e8.log").resolve())
+
     def package_script(name: str, *ros_args: str) -> ExecuteProcess:
+        add_env: dict[str, str] | None = None
+        if name == "cs612_auto_pick_place":
+            # 强制子进程继承 NDJSON 绝对路径（H_exec：部分环境下 ExecuteProcess 未合并上层 env）
+            add_env = {"CS612_DEBUG_NDJSON_PATH": _ap_ndjson}
         return ExecuteProcess(
             cmd=[
                 "/usr/bin/python3",
@@ -240,6 +308,7 @@ def _launch_setup(context, *args, **kwargs):
                 *ros_args,
             ],
             output="screen",
+            additional_env=add_env,
         )
 
     helpers = [
@@ -292,13 +361,19 @@ def _launch_setup(context, *args, **kwargs):
     )
     # #endregion
 
+    try:
+        ap_delay = float(auto_pick_delay_sec.perform(context))
+    except (ValueError, TypeError):
+        ap_delay = 25.0
+    ap_delay = max(0.0, min(float(ap_delay), 600.0))
+
     return [
         gz_launch,
         robot_state_publisher,
         TimerAction(period=2.0, actions=[spawn_robot]),
         TimerAction(period=4.0, actions=[joint_state_broadcaster, joint_trajectory_controller, gz_bridge, gz_set_pose_bridge]),
         TimerAction(period=5.0, actions=[move_group, *helpers, rviz]),
-        TimerAction(period=25.0, actions=[auto_pick_node], condition=IfCondition(auto_pick)),
+        TimerAction(period=ap_delay, actions=[auto_pick_node], condition=IfCondition(auto_pick)),
         RegisterEventHandler(
             OnProcessExit(
                 target_action=move_group,
@@ -442,12 +517,22 @@ def generate_launch_description():
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument("launch_rviz", default_value="true"),
             DeclareLaunchArgument("auto_pick", default_value="true"),
+            DeclareLaunchArgument(
+                "auto_pick_delay_sec",
+                default_value="25.0",
+                description="Launch 后延迟多少秒再启动 cs612_auto_pick_place（调试时可改小以更快产生日志）",
+            ),
             DeclareLaunchArgument("launch_gz_gui", default_value="false"),
             DeclareLaunchArgument("rviz_config", default_value="cs612.rviz"),
             SetEnvironmentVariable("HOME", str(runtime_home)),
             SetEnvironmentVariable("XDG_CONFIG_HOME", str(runtime_xdg_config)),
             SetEnvironmentVariable("XDG_CACHE_HOME", str(runtime_xdg_cache)),
             SetEnvironmentVariable("ROS_LOG_DIR", str(runtime_ros_logs)),
+            SetEnvironmentVariable("CS612_PROJECT_ROOT", str(project_root)),
+            SetEnvironmentVariable(
+                "CS612_DEBUG_NDJSON_PATH",
+                str((project_root / ".cursor" / "debug-9009e8.log").resolve()),
+            ),
             SetEnvironmentVariable("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4"),
             SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1"),
             SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe"),

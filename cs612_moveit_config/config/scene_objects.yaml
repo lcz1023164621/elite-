@@ -13,10 +13,13 @@ rect_pickup:
 
 carton_box:
   # 与 worlds/my_world.sdf 保持一致（model carton_box pose）
-  model_pose_xyz: [0.88, -0.34, 0.0]
+  model_pose_xyz: [0.82, -0.30, 0.0]
+  outer_size_xyz: [0.42, 0.30, 0.22]
+  wall_thickness: 0.008
+  floor_thickness: 0.006
   # 底板顶面近似高度（link 原点在地面上，底板 z=0.003, 半高 0.003 → 顶面 z≈0.006）
   floor_top_z: 0.006
   # 内腔中心 XY 与模型原点一致（箱体关于原点对称）
-  center_xy: [0.88, -0.34]
+  center_xy: [0.82, -0.30]
   # 放置时 TCP 目标：内腔上方（避免撞壁，需根据吸盘长度微调）
-  place_height_above_floor: 0.12
+  place_height_above_floor: 0.18

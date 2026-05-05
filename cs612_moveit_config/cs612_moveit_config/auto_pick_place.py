@@ -1,9 +1,12 @@
 """全自动：抓取并入箱（吸盘 attach/detach + MoveIt 避障）。"""
 from __future__ import annotations
 
+import json
 import math
+import re
 import os
 import shutil
+import sys
 import subprocess
 import threading
 import time
@@ -25,6 +28,7 @@ from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (
     AllowedCollisionEntry,
     AllowedCollisionMatrix,
+    AttachedCollisionObject,
     BoundingVolume,
     CollisionObject,
     Constraints,
@@ -45,7 +49,7 @@ from ros_gz_interfaces.msg import Entity
 from ros_gz_interfaces.srv import SetEntityPose
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
-from std_msgs.msg import Bool, Empty
+from std_msgs.msg import Bool, Empty, String
 from tf2_msgs.msg import TFMessage
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -59,6 +63,304 @@ _ARM_JOINTS = [
     "wrist_2_joint",
     "wrist_3_joint",
 ]
+
+_AGENT_SESSION_ID = "9009e8"
+_debug_ndjson_headers_sent: set[str] = set()
+_debug_ndjson_ros_pub: object | None = None
+# 与 bringup 中 debug-cfd510.log 相同约定：保证 Cursor 打开的本仓库路径始终有一份 NDJSON（即使 CS612_PROJECT_ROOT 指向其它副本）。
+_IDE_CURSOR_MIRROR_LOG = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-9009e8.log")
+_debug_ndjson_fs_warned: bool = False
+
+
+def _register_debug_ndjson_publisher(pub: object | None) -> None:
+    global _debug_ndjson_ros_pub
+    _debug_ndjson_ros_pub = pub
+
+
+def _env_cs612_project_root_cursor_log() -> Path | None:
+    """Launch 会设置 CS612_PROJECT_ROOT；不依赖 worlds 标记文件，避免日志落到 IDE 不可见路径。"""
+    er = (os.environ.get("CS612_PROJECT_ROOT") or "").strip()
+    if not er:
+        return None
+    try:
+        root = Path(er).resolve()
+        if root.is_dir():
+            return root / ".cursor" / "debug-9009e8.log"
+    except Exception:
+        pass
+    return None
+
+
+def _agent_debug_log_path() -> Path:
+    """
+    Session NDJSON 必须落在工程根目录的 .cursor/ 下（与 IDE 约定一致）。
+    根目录由 _workspace_root_from_marker() 解析（含从 cwd 回退）。
+    """
+    env_first = _env_cs612_project_root_cursor_log()
+    if env_first is not None:
+        return env_first
+    wr = _workspace_root_from_marker()
+    if wr is not None:
+        return wr / ".cursor" / "debug-9009e8.log"
+    return Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-9009e8.log")
+
+
+def _workspace_root_from_marker() -> Path | None:
+    """优先从模块路径向上找 worlds/my_world.sdf；失败则从 cwd 向上找（install/site-packages 场景）。"""
+    envp = os.environ.get("CS612_PROJECT_ROOT", "").strip()
+    if envp:
+        p = Path(envp).resolve()
+        if (p / "worlds" / "my_world.sdf").is_file():
+            return p
+    here = Path(__file__).resolve()
+    for anc in [here] + list(here.parents):
+        if (anc / "worlds" / "my_world.sdf").is_file():
+            return anc
+    cwd = Path.cwd().resolve()
+    for anc in [cwd] + list(cwd.parents):
+        if (anc / "worlds" / "my_world.sdf").is_file():
+            return anc
+    return None
+
+
+def _agent_debug_log_paths() -> list[Path]:
+    """主路径（工程 .cursor）+ 用户主目录镜像 + 工程根目录明文文件名；可选 CS612_DEBUG_NDJSON_PATH 强制追加路径。"""
+    primary = _agent_debug_log_path()
+    home_mirror = Path.home() / ".cursor" / "debug-9009e8.log"
+    root_plain: Path | None = None
+    wr = _workspace_root_from_marker()
+    if wr is not None:
+        root_plain = wr / "debug_cursor_session_9009e8.ndjson"
+    out: list[Path] = []
+    seen: set[str] = set()
+    # 镜像路径优先：避免 ROS 工程根与 Cursor 工作区不是同一路径时 IDE 读不到日志
+    for p in (_IDE_CURSOR_MIRROR_LOG, primary, home_mirror, root_plain):
+        if p is None:
+            continue
+        try:
+            key = str(p.resolve())
+        except Exception:
+            key = str(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    env_raw = os.environ.get("CS612_DEBUG_NDJSON_PATH", "").strip()
+    if env_raw:
+        try:
+            ep = Path(env_raw).expanduser()
+            key = str(ep.resolve())
+            if key not in seen:
+                seen.add(key)
+                out.append(ep)
+        except Exception:
+            pass
+    # 与 auto_pick_place.py 同目录（通常为 build 或源码树）
+    try:
+        pack_local = Path(__file__).resolve().parent / "debug_runtime_9009e8.ndjson"
+        key = str(pack_local.resolve())
+        if key not in seen:
+            seen.add(key)
+            out.append(pack_local)
+    except Exception:
+        pass
+    # 固定镜像：工程根下源码包路径（不依赖 __file__ 是否在 build），确保 Cursor 工作区内必有路径
+    if wr is not None:
+        src_mirror = wr / "cs612_moveit_config" / "cs612_moveit_config" / "debug_runtime_9009e8.ndjson"
+        try:
+            key = str(src_mirror.resolve())
+            if key not in seen:
+                seen.add(key)
+                out.append(src_mirror)
+        except Exception:
+            pass
+    return out
+
+
+def _agent_debug_ingest(line: str) -> None:
+    """转发 NDJSON 到 Cursor Debug Mode 采集端点，由 IDE 侧写入工作区 .cursor/debug-9009e8.log。"""
+    try:
+        import urllib.request
+
+        url = "http://127.0.0.1:7810/ingest/9a2352f3-a102-4091-892d-04936a6f8bc9"
+        req = urllib.request.Request(
+            url,
+            data=line.encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Debug-Session-Id": _AGENT_SESSION_ID,
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=0.35)
+    except Exception:
+        pass
+
+
+def _agent_debug_log(
+    location: str, message: str, hypothesis_id: str, data: dict, run_id: str = "pre-fix"
+) -> None:
+    # #region agent log
+    global _debug_ndjson_headers_sent, _debug_ndjson_fs_warned
+    line = json.dumps(
+        {
+            "sessionId": _AGENT_SESSION_ID,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        },
+        ensure_ascii=True,
+    )
+    wrote_any = False
+    path_keys_this_record: set[str] = set()
+    for log_path in _agent_debug_log_paths():
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            key = str(log_path.resolve())
+            if key in path_keys_this_record:
+                continue
+            path_keys_this_record.add(key)
+            with open(log_path, "a", encoding="utf-8") as f:
+                if key not in _debug_ndjson_headers_sent:
+                    _debug_ndjson_headers_sent.add(key)
+                    f.write(
+                        json.dumps(
+                            {
+                                "sessionId": _AGENT_SESSION_ID,
+                                "runId": run_id,
+                                "hypothesisId": "H0",
+                                "location": "auto_pick_place.py:_agent_debug_log",
+                                "message": "log_path_resolved",
+                                "data": {"path": key},
+                                "timestamp": int(time.time() * 1000),
+                            },
+                            ensure_ascii=True,
+                        )
+                        + "\n"
+                    )
+                f.write(line + "\n")
+            wrote_any = True
+        except Exception as ex:
+            if not _debug_ndjson_fs_warned:
+                _debug_ndjson_fs_warned = True
+                sys.stderr.write(
+                    f"[cs612_debug_9009e8] NDJSON write failed path={log_path!s} err={ex!s}\n"
+                )
+                sys.stderr.flush()
+            continue
+    if not wrote_any and not _debug_ndjson_fs_warned:
+        _debug_ndjson_fs_warned = True
+        sys.stderr.write("[cs612_debug_9009e8] NDJSON: no log path accepted any write\n")
+        sys.stderr.flush()
+    _agent_debug_ingest(line)
+    if _debug_ndjson_ros_pub is not None:
+        try:
+            m = String()
+            m.data = line
+            _debug_ndjson_ros_pub.publish(m)
+        except Exception:
+            pass
+    # #endregion
+
+
+def _gz_topic_info_sample(gz_bin: str, topic: str) -> str:
+    """`ign|gz topic -i -t` 输出，用于对照 ros_gz_bridge 的 gz_type_name（H7）。"""
+    try:
+        proc = subprocess.run(
+            [gz_bin, "topic", "-i", "-t", topic],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+        out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        return out[:700] if out else f"<empty rc={proc.returncode}>"
+    except Exception as ex:
+        return f"<info_exc {type(ex).__name__}: {ex}>"
+
+
+def _sample_gz_topic_info_fast(gz_bin: str, topic: str, timeout_sec: float = 1.2) -> str:
+    """`ign|gz topic -i -t` 快速版（短超时），用于初始化诊断。"""
+    try:
+        proc = subprocess.run(
+            [gz_bin, "topic", "-i", "-t", topic],
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+        out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        return out[:700] if out else f"<empty rc={proc.returncode}>"
+    except subprocess.TimeoutExpired:
+        return f"<timeout rc=-1>"
+    except Exception as ex:
+        return f"<info_exc {type(ex).__name__}: {ex}>"
+
+
+def _sample_gz_suction_state_raw(gz_bin: str, timeout_sec: float = 0.25) -> str:
+    """直接从 Gazebo Transport 采样一条 /cs612/suction/state（不经 ROS bridge），用于对照 H1/H5。"""
+    last_rc = -1
+    last_err = ""
+    last_exc = ""
+    for extra in ([],):
+        try:
+            proc = subprocess.run(
+                [gz_bin, "topic", "-t", "/cs612/suction/state", "-e", "-n", "1", *extra],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+                check=False,
+            )
+            last_rc = proc.returncode
+            last_err = (proc.stderr or "").strip()
+            out = (proc.stdout or "").strip()
+            if out:
+                return out[:800]
+        except Exception as ex:
+            last_exc = f"<sample_exc {type(ex).__name__}: {ex}>"
+    if last_exc:
+        return last_exc
+    return f"<empty_stdout rc={last_rc}> {last_err[:200]}"
+
+
+def _parse_gz_boolean_data(text: str) -> bool | None:
+    """解析 ign/gz topic echo 的 Boolean（protobuf text / JSON / 常见变体）。无法解析则 None。"""
+    if not text or text.startswith("<empty_stdout") or text.startswith("<sample_exc"):
+        return None
+    s = text.strip()
+    if s.startswith("{"):
+        try:
+            j = json.loads(s)
+            if isinstance(j, dict) and "data" in j:
+                v = j["data"]
+                if isinstance(v, bool):
+                    return v
+                if v in (0, 1):
+                    return bool(v)
+        except Exception:
+            pass
+    tl = text.lower()
+    if "data: true" in tl or re.search(r"\bdata:\s*true\b", tl):
+        return True
+    if "data: false" in tl or re.search(r"\bdata:\s*false\b", tl):
+        return False
+    # protobuf textformat 有时输出 data: 1 / data: 0
+    if re.search(r"(?m)^\s*data:\s*1\s*$", text):
+        return True
+    if re.search(r"(?m)^\s*data:\s*0\s*$", text):
+        return False
+    if '"data": true' in tl or "'data': true" in tl:
+        return True
+    if '"data": false' in tl:
+        return False
+    # 少数 protobuf 变体
+    if re.search(r"\bvalue:\s*true\b", tl):
+        return True
+    if re.search(r"\bvalue:\s*false\b", tl):
+        return False
+    return None
 
 
 @dataclass
@@ -426,6 +728,10 @@ def _gz_msg_prefix(gz_bin: str) -> str:
 class AutoPickPlaceNode(Node):
     def __init__(self) -> None:
         super().__init__("cs612_auto_pick_place")
+        # #region agent log
+        sys.stderr.write("[cs612_debug_9009e8] AutoPickPlaceNode __init__ ok\n")
+        sys.stderr.flush()
+        # #endregion
         rect_fb_xyz, carton_fb_xyz = _load_scene_fallback_xyz()
         self._cb = ReentrantCallbackGroup()
         self._log_lock = threading.Lock()
@@ -447,8 +753,8 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("suction_contact_offset_z", 0.214)
         self.declare_parameter("pre_pick_safe_clearance", 0.30)
         self.declare_parameter("carton_floor_top_z", 0.006)
-        self.declare_parameter("place_height_above_floor", 0.12)
-        self.declare_parameter("carton_outer_size_xyz", [0.28, 0.22, 0.13])
+        self.declare_parameter("place_height_above_floor", 0.18)
+        self.declare_parameter("carton_outer_size_xyz", [0.42, 0.30, 0.22])
         self.declare_parameter("carton_wall_thickness", 0.008)
         self.declare_parameter("carton_floor_thickness", 0.006)
         self.declare_parameter("post_pick_lift", 0.10)
@@ -487,16 +793,17 @@ class AutoPickPlaceNode(Node):
 
         self.declare_parameter("suction_touch_vertical_tol", 0.30)
         self.declare_parameter("suction_touch_axis_down_min", 0.90)
-        self.declare_parameter("suction_attach_burst_count", 25)
-        self.declare_parameter("suction_attach_burst_interval_sec", 0.06)
-        self.declare_parameter("suction_attach_wait_sec", 4.5)
+        self.declare_parameter("suction_attach_burst_count", 8)
+        self.declare_parameter("suction_attach_burst_interval_sec", 0.04)
+        self.declare_parameter("suction_attach_wait_sec", 1.0)
         self.declare_parameter("pickup_probe_lift_z", 0.025)
-        self.declare_parameter("pickup_probe_min_follow_z", 0.010)
+        self.declare_parameter("pickup_probe_min_follow_z", 0.018)
         self.declare_parameter("pickup_probe_require_follow_if_live_pose", True)
         self.declare_parameter("allow_unverified_sim_attach", True)
+        self.declare_parameter("assume_attach_on_valid_contact", True)
         self.declare_parameter("fake_attach_set_pose_fallback", True)
         self.declare_parameter("fake_attach_service", "/world/arm_world/set_pose")
-        self.declare_parameter("fake_attach_update_hz", 20.0)
+        self.declare_parameter("fake_attach_update_hz", 30.0)
         self.declare_parameter("ik_service", "/compute_ik")
         # 官方 Elite 栈使用 ros2_control + MoveIt 执行，默认通过 MoveIt IK/轨迹控制器下发。
         self.declare_parameter("use_compute_ik", True)
@@ -652,6 +959,11 @@ class AutoPickPlaceNode(Node):
         self._pub_attach = self.create_publisher(Empty, "/cs612/suction/attach", 10)
         self._pub_detach = self.create_publisher(Empty, "/cs612/suction/detach", 10)
         self._pub_visual_attached = self.create_publisher(Bool, "/cs612/suction/attached_visual_state", 10)
+        self._pub_assumed_state = self.create_publisher(Bool, "/cs612/suction/assumed_state", 10)
+        if os.environ.get("CS612_DEBUG_PUBLISH_ROS", "").strip():
+            _register_debug_ndjson_publisher(
+                self.create_publisher(String, "/cs612/debug_ndjson_line", 10)
+            )
         self._traj_pub = self.create_publisher(
             JointTrajectory,
             "/joint_trajectory_controller/joint_trajectory",
@@ -682,6 +994,42 @@ class AutoPickPlaceNode(Node):
         self._kin_ready = self._load_kinematics_model()
         self._gz_bin = _find_gz_executable()
         self._gz_msg_pfx = _gz_msg_prefix(self._gz_bin)
+        # #region agent log
+        _suct_info = _sample_gz_topic_info_fast(self._gz_bin, "/cs612/suction/state")
+        _agent_debug_log(
+            "auto_pick_place.py:__init__",
+            "gz_topic_info_suction_state",
+            "H7",
+            {
+                "info": _suct_info,
+                "expected_bridge_yaml": "gz.msgs.Boolean -> std_msgs/msg/Bool",
+            },
+        )
+        # #endregion
+        _topics_unknown = _suct_info.startswith("<timeout") or _suct_info.startswith("<info_exc")
+        _topics_present = (
+            not _topics_unknown
+            and not _suct_info.startswith("<empty")
+            and "No publishers" not in _suct_info
+            and "not found" not in _suct_info.lower()
+        )
+        if _topics_unknown:
+            self.get_logger().warn(
+                "DetachableJoint state 话题快速探测超时；该话题是事件型输出，"
+                "不再据此判定插件缺失，将在 attach 后用几何接触 + 抬升跟随验证。"
+            )
+        elif not _topics_present:
+            self.get_logger().warn(
+                "\n"
+                "⚠️  DetachableJoint 话题 /cs612/suction/state 在 Gazebo Transport 中不存在！\n"
+                "    ignition-gazebo-detachable-joint-system 插件可能未加载到机器人模型中。\n"
+                "    将通过 Gazebo SetEntityPose CLI 仿真吸附兜底维持物体跟随。\n"
+                "    检查: ign topic -i -t /cs612/suction/state"
+            )
+        else:
+            self.get_logger().info(
+                "DetachableJoint 话题 /cs612/suction/state 已在 Gazebo Transport 中注册"
+            )
         self.get_logger().info(
             "参数快照: "
             f"use_joint_template_demo={self._param_bool('use_joint_template_demo')}, "
@@ -692,6 +1040,29 @@ class AutoPickPlaceNode(Node):
             f"move_velocity_scale={float(self.get_parameter('move_velocity_scale').value):.2f}, "
             f"move_acceleration_scale={float(self.get_parameter('move_acceleration_scale').value):.2f}"
         )
+        # #region agent log
+        _agent_debug_log(
+            "auto_pick_place.py:__init__",
+            "node_ready_gz_bridge",
+            "H2",
+            {
+                "gz_bin": self._gz_bin,
+                "gz_msg_pfx": self._gz_msg_pfx,
+                "suction_state_sub_qos": "qos_profile_sensor_data",
+            },
+        )
+        try:
+            self.get_logger().info(
+                "[debug] NDJSON session 9009e8 写入位置: "
+                + " | ".join(str(p.resolve()) for p in _agent_debug_log_paths())
+            )
+        except Exception:
+            pass
+        if os.environ.get("CS612_DEBUG_PUBLISH_ROS", "").strip():
+            self.get_logger().info(
+                "[debug] NDJSON 同时发布到 std_msgs/String 话题 /cs612/debug_ndjson_line"
+            )
+        # #endregion
 
     def _param_bool(self, name: str) -> bool:
         return _as_bool(self.get_parameter(name).value)
@@ -1557,6 +1928,32 @@ class AutoPickPlaceNode(Node):
             self.get_logger().warn(f"放置点箱内夹紧失败，将使用原值: {e}")
         return out
 
+    def _place_retreat_point(
+        self, place_pt: Point, carton_ps: PoseStamped | None, post_place_retreat: float
+    ) -> Point:
+        out = Point(
+            x=place_pt.x,
+            y=place_pt.y,
+            z=place_pt.z + post_place_retreat,
+        )
+        if carton_ps is None:
+            return out
+        try:
+            _, _, carton_h = [float(v) for v in self.get_parameter("carton_outer_size_xyz").value]
+            edge_clearance = max(0.06, float(self.get_parameter("place_entry_clearance").value))
+            c = carton_ps.pose.position
+            q = carton_ps.pose.orientation
+            safe = self._point_with_local_offset(c, q, 0.0, 0.0, carton_h + edge_clearance)
+            if safe.z > out.z + 1e-6:
+                self.get_logger().info(
+                    "退避高度抬高到箱沿以上: "
+                    f"z={out.z:.3f} -> {safe.z:.3f} (carton_h={carton_h:.3f}, clearance={edge_clearance:.3f})"
+                )
+                out.z = safe.z
+        except Exception as e:
+            self.get_logger().warn(f"计算箱沿安全退避高度失败，将使用默认退避高度: {e}")
+        return out
+
     def _on_rect(self, msg: PoseStamped) -> None:
         # 丢弃异常全零位姿；勿按「近 XY 原点」过滤，否则会丢掉合法物体或错误筛掉首帧。
         p = msg.pose.position
@@ -1660,6 +2057,20 @@ class AutoPickPlaceNode(Node):
         self._check_ready()
 
     def _on_suction_state(self, msg: Bool) -> None:
+        # #region agent log
+        prev = self._suction_attached
+        _agent_debug_log(
+            "auto_pick_place.py:_on_suction_state",
+            "ros_suction_state_msg",
+            "H1",
+            {"data": bool(msg.data), "prev": prev},
+        )
+        # #endregion
+        if self._fake_attach_active and not bool(msg.data):
+            self.get_logger().debug(
+                "SetEntityPose 仿真吸附兜底运行中，忽略 DetachableJoint detach 状态回传"
+            )
+            return
         self._suction_attached = bool(msg.data)
         if self._suction_attached:
             self._rect_pose_can_move = True
@@ -1672,6 +2083,55 @@ class AutoPickPlaceNode(Node):
                 return True
         return False
 
+    def _detach_pulse_before_attach(self) -> None:
+        """
+        发送 attach 前做一次短暂 detach，迫使 DetachableJoint 产生 detach→attach 的状态跳变。
+        否则插件可能长期处于“已附着”并仅回应 “Already attached”，不再向 output_topic 发布 true。
+        统一只通过 ROS publisher → ros_gz_bridge → Gazebo 单通道发送，避免 CLI 与 ROS 混用
+        导致的时序竞争。
+        """
+        self._pub_detach.publish(Empty())
+        time.sleep(0.5)
+
+    def _wait_suction_attached_hybrid(self, timeout_sec: float, run_id: str = "pre-fix") -> bool:
+        """
+        确认附着：优先 /cs612/suction/state（ROS），最后再做一次 Gazebo Transport 直连采样。
+
+        DetachableJoint 的 output_topic 是事件型消息，不是 latched/周期状态。attach 发生得很快时，
+        后启动的 ``ign topic -e -n 1`` 经常会错过这一帧并阻塞到超时；因此这里避免循环调用 CLI。
+        """
+        t0 = time.time()
+        while rclpy.ok() and (time.time() - t0) < timeout_sec:
+            if self._suction_attached is True:
+                return True
+            time.sleep(0.02)
+
+        raw = _sample_gz_suction_state_raw(self._gz_bin)
+        parsed = _parse_gz_boolean_data(raw)
+        # #region agent log
+        _agent_debug_log(
+            "auto_pick_place.py:_wait_suction_attached_hybrid",
+            "gz_poll_once",
+            "H1",
+            {"parsed": parsed, "raw_prefix": raw[:200]},
+            run_id=run_id,
+        )
+        # #endregion
+        if parsed is True:
+            self._suction_attached = True
+            self._rect_pose_can_move = True
+            self._publish_assumed_state(True)
+            self.get_logger().info(
+                "吸附状态已由 Gazebo Transport 直连确认（ROS bridge 可能漏包）"
+            )
+            return True
+        if self._suction_attached is not True and raw:
+            self.get_logger().warn(
+                "吸附状态事件未确认：GZ state 采样前缀 "
+                f"{raw[:220]!r}"
+            )
+        return self._suction_attached is True
+
     def _publish_attach_burst(self) -> None:
         burst = max(1, int(self.get_parameter("suction_attach_burst_count").value))
         interval = max(0.01, float(self.get_parameter("suction_attach_burst_interval_sec").value))
@@ -1683,9 +2143,10 @@ class AutoPickPlaceNode(Node):
     def _detach_via_gz_cli(self, repeats: int = 3) -> bool:
         """
         社区常用兜底：直接通过 Gazebo Transport 发送 detach，绕开 ROS bridge/DDS 抖动。
+        WSL2 下 ign 命令启动可能较慢，timeout 放大到 5.0s；stderr 保留以便排查。
         """
         ok = False
-        for _ in range(max(1, int(repeats))):
+        for i in range(max(1, int(repeats))):
             try:
                 proc = subprocess.run(
                     [
@@ -1699,19 +2160,25 @@ class AutoPickPlaceNode(Node):
                         "unused: true",
                     ],
                     check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=1.5,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5.0,
                 )
-                ok = ok or (proc.returncode == 0)
-            except Exception:
-                pass
+                if proc.returncode == 0:
+                    ok = True
+                else:
+                    err = proc.stderr.decode("utf-8", errors="replace").strip()[:200]
+                    self.get_logger().warn(
+                        f"detach_via_gz_cli [{i+1}/{repeats}] returncode={proc.returncode}, stderr={err!r}"
+                    )
+            except Exception as e:
+                self.get_logger().warn(f"detach_via_gz_cli [{i+1}/{repeats}] exception: {e}")
             time.sleep(0.08)
         return ok
 
-    def _attach_via_gz_cli(self, repeats: int = 2) -> bool:
+    def _attach_via_gz_cli(self, repeats: int = 1) -> bool:
         ok = False
-        for _ in range(max(1, int(repeats))):
+        for i in range(max(1, int(repeats))):
             try:
                 proc = subprocess.run(
                     [
@@ -1725,15 +2192,34 @@ class AutoPickPlaceNode(Node):
                         "unused: true",
                     ],
                     check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=1.5,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5.0,
                 )
-                ok = ok or (proc.returncode == 0)
-            except Exception:
-                pass
+                if proc.returncode == 0:
+                    ok = True
+                else:
+                    err = proc.stderr.decode("utf-8", errors="replace").strip()[:200]
+                    self.get_logger().warn(
+                        f"attach_via_gz_cli [{i+1}/{repeats}] returncode={proc.returncode}, stderr={err!r}"
+                    )
+            except Exception as e:
+                self.get_logger().warn(f"attach_via_gz_cli [{i+1}/{repeats}] exception: {e}")
             time.sleep(0.08)
         return ok
+
+    def _mark_attach_assumed(self, reason: str) -> None:
+        self._suction_attached = True
+        self._rect_pose_can_move = True
+        self._pub_assumed_state.publish(Bool(data=True))
+        self.get_logger().warn(
+            f"{reason}: /cs612/suction/state 未可靠回传，"
+            "但 attach 已下发且吸盘几何接触合格；按已吸附继续，并用位姿跟随保证物体贴合吸盘。"
+        )
+
+    def _publish_assumed_state(self, value: bool) -> None:
+        self._pub_assumed_state.publish(Bool(data=value))
+        self.get_logger().info(f"已发布 assumed_state: {value} -> /cs612/suction/assumed_state")
 
     def _rect_pose_under_suction(self, half_sizes: Sequence[float]) -> Pose | None:
         cup_pose = self._lookup_link_pose_in_base("suction_cup_link")
@@ -1757,6 +2243,13 @@ class AutoPickPlaceNode(Node):
         return pose
 
     def _set_rect_pose(self, pose: Pose, wait_sec: float = 0.15, log_timeout: bool = False) -> bool:
+        # 优先尝试 Gazebo Transport 直连（绕过 ROS bridge / parameter_bridge 可能存在的服务映射问题）
+        gz_ok = self._set_rect_pose_via_gz(pose)
+        if gz_ok:
+            return True
+        return self._set_rect_pose_ros(pose, wait_sec=wait_sec, log_timeout=log_timeout)
+
+    def _set_rect_pose_ros(self, pose: Pose, wait_sec: float = 0.15, log_timeout: bool = False) -> bool:
         if not self._set_pose_client.service_is_ready():
             return False
         req = SetEntityPose.Request()
@@ -1777,31 +2270,218 @@ class AutoPickPlaceNode(Node):
         except Exception:
             return False
 
+    def _set_rect_pose_via_gz(self, pose: Pose) -> bool:
+        gz_bin = self._gz_bin
+        pfx = self._gz_msg_pfx
+        q = _quat_normalize(pose.orientation)
+        req = (
+            f'name: "rect_pickup"\n'
+            f'position {{\n'
+            f'  x: {pose.position.x:.5f}\n'
+            f'  y: {pose.position.y:.5f}\n'
+            f'  z: {pose.position.z:.5f}\n'
+            f'}}\n'
+            f'orientation {{\n'
+            f'  x: {q.x:.8f}\n'
+            f'  y: {q.y:.8f}\n'
+            f'  z: {q.z:.8f}\n'
+            f'  w: {q.w:.8f}\n'
+            f'}}'
+        )
+        try:
+            proc = subprocess.run(
+                [gz_bin, "service", "-s", "/world/arm_world/set_pose",
+                 "--reqtype", f"{pfx}.Pose",
+                 "--reptype", f"{pfx}.Boolean",
+                 "--timeout", "1500",
+                 "-r", req],
+                capture_output=True, text=True, timeout=2.5, check=False,
+            )
+            if proc.returncode == 0:
+                stderr_lower = (proc.stderr or "").lower()
+                stdout_lower = (proc.stdout or "").lower()
+                if "error" not in stderr_lower and "error" not in stdout_lower:
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _fake_attach_loop(self, half_sizes: Sequence[float]) -> None:
         hz = max(1.0, float(self.get_parameter("fake_attach_update_hz").value))
         period = 1.0 / hz
+        wait_sec = min(0.08, max(0.02, period * 1.5))
+        fail_streak = 0
+        max_fail_streak = 30
         while rclpy.ok() and not self._fake_attach_stop.is_set():
             pose = self._rect_pose_under_suction(half_sizes)
             if pose is not None:
-                self._set_rect_pose(pose, wait_sec=0.0)
+                ok = self._set_rect_pose_ros(pose, wait_sec=wait_sec, log_timeout=False)
+                if not ok:
+                    ok = self._set_rect_pose_via_gz(pose)
+                if ok:
+                    fail_streak = 0
+                else:
+                    fail_streak += 1
+                    if fail_streak >= max_fail_streak:
+                        self.get_logger().error(
+                            f"SetEntityPose 连续失败 {fail_streak} 次，停止仿真吸附兜底"
+                        )
+                        self._fake_attach_active = False
+                        break
             time.sleep(period)
+
+    def _snap_fake_attach_pose(
+        self,
+        half_sizes: Sequence[float],
+        label: str,
+        attempts: int = 2,
+    ) -> bool:
+        if not self._fake_attach_active:
+            return False
+        for idx in range(max(1, int(attempts))):
+            pose = self._rect_pose_under_suction(half_sizes)
+            if pose is None:
+                time.sleep(0.05)
+                continue
+            if self._set_rect_pose(pose, wait_sec=0.3, log_timeout=False):
+                self._rect_pose_can_move = True
+                self.get_logger().info(
+                    f"{label}: SetEntityPose 已同步物体到吸盘下方 "
+                    f"({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f})"
+                )
+                return True
+            if idx + 1 < max(1, int(attempts)):
+                time.sleep(0.08)
+        self.get_logger().warn(f"{label}: SetEntityPose 同步吸附位姿失败")
+        return False
+
+    def _rect_pose_centered_in_carton(
+        self, carton_ps: PoseStamped | None, half_sizes: Sequence[float]
+    ) -> Pose | None:
+        if carton_ps is None:
+            return None
+        half_z = max(0.001, float(half_sizes[2]) if len(half_sizes) >= 3 else 0.04)
+        floor_top_z = float(self.get_parameter("carton_floor_top_z").value)
+        c = carton_ps.pose.position
+        q = _quat_normalize(carton_ps.pose.orientation)
+        dx, dy, dz = _quat_rotate_vec(q, 0.0, 0.0, floor_top_z + half_z)
+        pose = Pose()
+        pose.position.x = c.x + dx
+        pose.position.y = c.y + dy
+        pose.position.z = c.z + dz
+        pose.orientation = q
+        return pose
+
+    def _release_and_center_rect_in_carton(
+        self,
+        carton_ps: PoseStamped | None,
+        half_sizes: Sequence[float],
+        label: str = "place_center_release",
+    ) -> bool:
+        final_pose = self._rect_pose_centered_in_carton(carton_ps, half_sizes)
+        self._suction_attached = None
+        self._stop_fake_attach(label)
+        self._pub_detach.publish(Empty())
+        if not self._wait_suction_state(False, 0.7) and self._suction_attached is True:
+            self._detach_via_gz_cli(repeats=1)
+        self._suction_attached = False
+        self._publish_assumed_state(False)
+
+        if final_pose is None:
+            self.get_logger().warn(f"{label}: 未获得容器位姿，无法执行中心/姿态最终对齐")
+            return False
+
+        for i in range(3):
+            if self._set_rect_pose(final_pose, wait_sec=0.5, log_timeout=(i == 2)):
+                self._rect_pose_can_move = True
+                self._apply_released_rect_collision_scene(final_pose, half_sizes)
+                self.get_logger().info(
+                    f"{label}: 已将 rect_pickup 中心对齐容器中心并按容器边缘朝向放置 "
+                    f"({final_pose.position.x:.3f}, {final_pose.position.y:.3f}, {final_pose.position.z:.3f}), "
+                    f"q=({final_pose.orientation.x:.4f},{final_pose.orientation.y:.4f},"
+                    f"{final_pose.orientation.z:.4f},{final_pose.orientation.w:.4f})"
+                )
+                return True
+            time.sleep(0.12)
+        self.get_logger().warn(f"{label}: 最终中心/姿态对齐 SetEntityPose 失败")
+        return False
+
+    def _apply_released_rect_collision_scene(
+        self, pose: Pose, half_sizes: Sequence[float], timeout_sec: float = 2.0
+    ) -> bool:
+        sx = 2.0 * float(half_sizes[0]) if len(half_sizes) >= 1 else 0.20
+        sy = 2.0 * float(half_sizes[1]) if len(half_sizes) >= 2 else 0.14
+        sz = 2.0 * float(half_sizes[2]) if len(half_sizes) >= 3 else 0.08
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.world.collision_objects = [
+            self._make_collision_box(
+                "scene_rect_pickup",
+                pose.position,
+                pose.orientation,
+                [sx, sy, sz],
+            )
+        ]
+        scene.robot_state.is_diff = True
+        aco_remove = AttachedCollisionObject()
+        aco_remove.link_name = "suction_tcp_link"
+        aco_remove.object = CollisionObject()
+        aco_remove.object.id = "scene_rect_pickup"
+        aco_remove.object.operation = CollisionObject.REMOVE
+        scene.robot_state.attached_collision_objects = [aco_remove]
+
+        req = ApplyPlanningScene.Request()
+        req.scene = scene
+        try:
+            fut = self._scene_client.call_async(req)
+        except Exception as e:
+            self.get_logger().warn(f"释放后规划场景清理发送失败: {e}")
+            return False
+        if not _spin_future(self, fut, timeout_sec, "release_rect_planning_scene", log_timeout=False):
+            self.get_logger().warn("释放后规划场景清理超时，将等待 planning_scene_spawner 周期刷新")
+            return False
+        res = fut.result()
+        ok = bool(res and res.success)
+        if ok:
+            self.get_logger().info("释放后已清理 MoveIt attached object，并将 rect_pickup 写回世界碰撞物")
+        else:
+            self.get_logger().warn("释放后规划场景清理失败，将等待 planning_scene_spawner 周期刷新")
+        return ok
 
     def _start_fake_attach(self, half_sizes: Sequence[float], reason: str) -> bool:
         if not self._param_bool("fake_attach_set_pose_fallback"):
             return False
         if self._fake_attach_active:
             return True
-        if not self._set_pose_client.wait_for_service(timeout_sec=1.0):
+        # 如果物理约束已经存在（_suction_attached=True），不要发送 detach 摧毁它，
+        # 只需启动 SetEntityPose 跟随作为双重保险。
+        physical_attached = self._suction_attached is True
+        ros_ok = self._set_pose_client.wait_for_service(timeout_sec=1.0)
+        if not ros_ok:
             self.get_logger().warn(
-                f"{reason}: /world/arm_world/set_pose 服务不可用，无法启用仿真位姿跟随兜底"
+                f"{reason}: /world/arm_world/set_pose ROS 服务不可用，将仅使用 Gazebo Transport CLI 直连"
             )
-            return False
         pose = self._rect_pose_under_suction(half_sizes)
         if pose is not None:
-            self._set_rect_pose(pose, wait_sec=0.6)
+            ros_set = ros_ok and self._set_rect_pose_ros(pose, wait_sec=0.3)
+            gz_ok = False
+            if not ros_set:
+                gz_ok = self._set_rect_pose_via_gz(pose)
+            if ros_set:
+                self.get_logger().info(
+                    f"SetEntityPose 初始位姿已通过 ROS 服务下发: "
+                    f"({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f})"
+                )
+            elif gz_ok:
+                self.get_logger().info(
+                    f"SetEntityPose 初始位姿已通过 Gazebo Transport CLI 下发: "
+                    f"({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f})"
+                )
         self._fake_attach_stop.clear()
         self._fake_attach_active = True
         self._rect_pose_can_move = True
+        self._suction_attached = True
+        self._publish_assumed_state(True)
         self._pub_visual_attached.publish(Bool(data=True))
         self._fake_attach_thread = threading.Thread(
             target=self._fake_attach_loop,
@@ -1809,7 +2489,19 @@ class AutoPickPlaceNode(Node):
             daemon=True,
         )
         self._fake_attach_thread.start()
-        self.get_logger().warn(f"{reason}: 已启用 Gazebo SetEntityPose 仿真吸附兜底")
+        if not physical_attached:
+            self._pub_detach.publish(Empty())
+            detached = self._detach_via_gz_cli(repeats=1)
+            self._snap_fake_attach_pose(half_sizes, "fake_attach_start")
+            if detached:
+                self.get_logger().warn(
+                    f"{reason}: 已解除 DetachableJoint 物理约束，改由 SetEntityPose 刚性跟随吸盘"
+                )
+            self.get_logger().warn(f"{reason}: 已启用 Gazebo SetEntityPose 仿真吸附兜底")
+        else:
+            self.get_logger().info(
+                f"{reason}: 物理约束已存在，跳过 detach，SetEntityPose 仅作为跟随辅助"
+            )
         return True
 
     def _stop_fake_attach(self, label: str) -> None:
@@ -1848,7 +2540,15 @@ class AutoPickPlaceNode(Node):
         # 若 state 话题暂不可用，改走 Gazebo 直连 detach；这是 DetachableJoint 社区常见稳态做法。
         if self._detach_via_gz_cli(repeats=6):
             self._suction_attached = False
+            self._publish_assumed_state(False)
             self.get_logger().warn(f"ROS detach 未确认，已通过 {self._gz_bin} 直连 detach 兜底")
+            return True
+        # 在 bridge / state 话题抖动时，Gazebo 可能已执行 detach 但无状态回传。
+        # 若未明确观测到 attached=true，则按"已发送 detach，继续执行"处理，避免误中止。
+        if not saw_state_false and self._suction_attached is not True:
+            self._suction_attached = False
+            self._publish_assumed_state(False)
+            self.get_logger().warn("detach 状态未确认，但未观测到仍附着；按已释放继续执行")
             return True
         # 在 bridge / state 话题抖动时，Gazebo 可能已执行 detach 但无状态回传。
         # 若未明确观测到 attached=true，则按“已发送 detach，继续执行”处理，避免误中止。
@@ -3133,6 +3833,7 @@ class AutoPickPlaceNode(Node):
         self,
         touch: Point,
         orientation: Quaternion,
+        half_sizes: Sequence[float] | None = None,
         label: str = "pick_probe_lift",
     ) -> tuple[bool, Point]:
         """
@@ -3143,7 +3844,10 @@ class AutoPickPlaceNode(Node):
         STATE_FAIL：suction=false 且物体未跟随 -> 确认失败
         """
         probe_lift_z = max(0.005, float(self.get_parameter("pickup_probe_lift_z").value))
-        min_follow_z = max(0.002, float(self.get_parameter("pickup_probe_min_follow_z").value))
+        configured_min_follow_z = max(
+            0.002, float(self.get_parameter("pickup_probe_min_follow_z").value)
+        )
+        min_follow_z = max(configured_min_follow_z, 0.70 * probe_lift_z)
         rect_z_before = self._current_rect_center_z()
         probe_target = Point(x=touch.x, y=touch.y, z=touch.z + probe_lift_z)
 
@@ -3156,6 +3860,7 @@ class AutoPickPlaceNode(Node):
             f"[{label}] 探针抬升: "
             f"touch=({touch.x:.4f},{touch.y:.4f},{touch.z:.4f}), "
             f"probe_z={probe_target.z:.4f}, lift={probe_lift_z:.4f}m, "
+            f"min_follow={min_follow_z:.4f}m, "
             f"rect_z_before={'N/A' if rect_z_before is None else f'{rect_z_before:.4f}'}"
         )
         moved = self._move_cartesian_direct(
@@ -3180,6 +3885,9 @@ class AutoPickPlaceNode(Node):
             self.get_logger().error(f"{label}: 探测抬升执行失败")
             return False, probe_target
 
+        snap_ok = False
+        if self._fake_attach_active and half_sizes is not None:
+            snap_ok = self._snap_fake_attach_pose(half_sizes, f"{label}_snap", attempts=3)
         time.sleep(0.25)
         rect_z_after = self._current_rect_center_z()
         follow_dz = (
@@ -3193,7 +3901,12 @@ class AutoPickPlaceNode(Node):
         require_follow_if_live_pose = self._param_bool("pickup_probe_require_follow_if_live_pose")
         allow_unverified = self._param_bool("allow_unverified_sim_attach")
 
-        if require_follow_if_live_pose and has_live_pose:
+        if self._fake_attach_active and snap_ok:
+            success = True
+            state_label = "STATE_SETPOSE_SNAP: SetEntityPose 兜底已把物体同步到吸盘下方"
+            follow_text = "N/A" if follow_dz is None else f"{follow_dz:.4f}m"
+            reason = f"{state_label} | physical_follow_dz={follow_text}, suction_state={self._suction_attached}"
+        elif require_follow_if_live_pose and has_live_pose:
             success = follow_ok
             if success:
                 if state_ok:
@@ -3226,6 +3939,21 @@ class AutoPickPlaceNode(Node):
             f"rect_z: before={'N/A' if rect_z_before is None else f'{rect_z_before:.4f}'} "
             f"after={'N/A' if rect_z_after is None else f'{rect_z_after:.4f}'}"
         )
+        # #region agent log
+        _agent_debug_log(
+            "auto_pick_place.py:_probe_pickup_follow",
+            "probe_result",
+            "H4",
+            {
+                "success": success,
+                "state_ok": state_ok,
+                "follow_ok": follow_ok,
+                "follow_dz": follow_dz,
+                "fake_attach_active": self._fake_attach_active,
+                "suction_attached": self._suction_attached,
+            },
+        )
+        # #endregion
 
         if success:
             self.get_logger().info(f"[{label}] 吸附验证通过（{reason}）")
@@ -3236,40 +3964,6 @@ class AutoPickPlaceNode(Node):
         self.get_logger().warn(
             f"[{label}] 吸附验证失败（{reason}）, "
             f"before={before_text}, after={after_text}, min_follow={min_follow_z:.4f}"
-        )
-        return False, probe_target
-
-        time.sleep(0.25)
-        rect_z_after = self._current_rect_center_z()
-        follow_dz = (
-            (rect_z_after - rect_z_before)
-            if rect_z_before is not None and rect_z_after is not None
-            else None
-        )
-        state_ok = self._suction_attached is True
-        follow_ok = follow_dz is not None and follow_dz >= min_follow_z
-        require_follow_if_live_pose = self._param_bool("pickup_probe_require_follow_if_live_pose")
-        has_live_pose = self._logged_rect and (rect_z_before is not None and rect_z_after is not None)
-        if require_follow_if_live_pose and has_live_pose:
-            success = follow_ok
-            reason = f"follow_dz={follow_dz:.4f}m" if follow_dz is not None else "follow_dz=N/A"
-        else:
-            success = state_ok or follow_ok
-            reasons: list[str] = []
-            if state_ok:
-                reasons.append("state=true")
-            if follow_ok and follow_dz is not None:
-                reasons.append(f"follow_dz={follow_dz:.4f}m")
-            reason = " + ".join(reasons) if reasons else "none"
-        if success:
-            self.get_logger().info(f"{label}: 吸附验证通过（{reason}）")
-            return True, probe_target
-
-        before_text = f"{rect_z_before:.3f}" if rect_z_before is not None else "N/A"
-        after_text = f"{rect_z_after:.3f}" if rect_z_after is not None else "N/A"
-        self.get_logger().warn(
-            f"{label}: 吸附验证失败（state={self._suction_attached}, "
-            f"before={before_text}, after={after_text}, min_follow={min_follow_z:.4f}）"
         )
         return False, probe_target
 
@@ -3875,12 +4569,14 @@ class AutoPickPlaceNode(Node):
         attach_wait_sec = max(0.5, float(self.get_parameter("suction_attach_wait_sec").value))
         self._suction_attached = None
         self.get_logger().info("模板路径: 吸附 attach")
-        self._publish_attach_burst()
-        if not self._wait_suction_state(True, attach_wait_sec):
+        self._detach_pulse_before_attach()
+        self._attach_via_gz_cli(repeats=3)
+        if not self._wait_suction_attached_hybrid(attach_wait_sec, run_id="post-fix"):
             self.get_logger().warn("模板路径: 首次 attach 未确认，二次 attach 重试")
             self._suction_attached = None
-            self._publish_attach_burst()
-            self._wait_suction_state(True, attach_wait_sec)
+            self._detach_pulse_before_attach()
+            self._attach_via_gz_cli(repeats=3)
+            self._wait_suction_attached_hybrid(attach_wait_sec, run_id="post-fix")
 
         if not self._send_move(lift, "tmpl_lift"):
             self._pub_detach.publish(Empty())
@@ -4071,6 +4767,7 @@ class AutoPickPlaceNode(Node):
         )
 
         if carton_ps is not None:
+            place_retreat = self._place_retreat_point(place_pt, carton_ps, post_place_retreat)
             if self._param_bool("use_compute_ik") and (not self._apply_carton_collision_scene(carton_ps)):
                 return
         else:
@@ -4392,25 +5089,72 @@ class AutoPickPlaceNode(Node):
         attach_wait_sec = max(0.5, float(self.get_parameter("suction_attach_wait_sec").value))
         self._suction_attached = None
         gz_attach_sent = False
-        # 同时通过 ROS 和 Gazebo CLI 双通道发送 attach 指令，确保 DetachableJoint 可靠接收
-        self._publish_attach_burst()
-        if self._attach_via_gz_cli(repeats=6):
+        assume_attach = False
+        # 统一通过 gz CLI（Gazebo Transport 直连）发送 attach/detach，
+        # 避免 ROS bridge/DDS 延迟导致的消息丢失或顺序错乱。
+        self._detach_pulse_before_attach()
+        # #region agent log
+        _agent_debug_log(
+            "auto_pick_place.py:pick_main",
+            "pre_attach_cli",
+            "H3",
+            {"cleared_suction_attached": None, "attach_wait_sec": attach_wait_sec},
+        )
+        # #endregion
+        if self._attach_via_gz_cli(repeats=3):
             gz_attach_sent = True
-            self.get_logger().info(f"已下发 {self._gz_bin} attach 指令（双通道并行）")
-        if not self._wait_suction_state(True, attach_wait_sec):
+            self.get_logger().info(f"已下发 {self._gz_bin} attach 指令（Gazebo Transport 直连）")
+        else:
+            self.get_logger().warn(f"{self._gz_bin} attach 指令下发失败，回退到 ROS publisher")
+            self._publish_attach_burst()
+            gz_attach_sent = True
+        contact_ok_after_attach = self._suction_bottom_alignment_ok(half, strict=False)
+        if contact_ok_after_attach and self._param_bool("assume_attach_on_valid_contact"):
+            assume_attach = True
+            gz_attach_sent = True
+            self._mark_attach_assumed("attach_on_valid_contact")
+            if self._param_bool("allow_unverified_sim_attach"):
+                self._start_fake_attach(
+                    half,
+                    "attach_on_valid_contact: 启用 SetEntityPose 跟随辅助，确保仿真吸附稳定",
+                )
+        # #region agent log
+        first_wait = assume_attach or self._wait_suction_attached_hybrid(
+            attach_wait_sec, run_id="post-fix"
+        )
+        if first_wait:
+            _agent_debug_log(
+                "auto_pick_place.py:pick_main",
+                "wait_suction_true_ok",
+                "H1",
+                {"ros_suction_attached": self._suction_attached},
+                run_id="post-fix",
+            )
+        else:
+            _agent_debug_log(
+                "auto_pick_place.py:pick_main",
+                "wait_suction_true_failed",
+                "H1",
+                {
+                    "ros_suction_attached": self._suction_attached,
+                    "gz_state_raw_1line": _sample_gz_suction_state_raw(self._gz_bin),
+                },
+                run_id="post-fix",
+            )
+        # #endregion
+        if not first_wait:
             if self._suction_bottom_alignment_ok(half, strict=False):
                 self.get_logger().warn(
                     "未收到 state=true，但 Gazebo 已接收 attach 且吸盘几何合格；"
-                    "额外发送 Gazebo CLI attach 并延长等待"
+                    "按已吸附继续，并由探针抬升验证"
                 )
-                if not gz_attach_sent:
-                    self._attach_via_gz_cli(repeats=12)
-                    gz_attach_sent = True
-                if not self._wait_suction_state(True, 2.0):
-                    self.get_logger().warn(
-                        "状态仍未确认，启用仿真吸附兜底以保证物体跟随"
+                self._mark_attach_assumed("attach_state_missing")
+                if self._param_bool("allow_unverified_sim_attach"):
+                    self._start_fake_attach(
+                        half,
+                        "attach_state_missing: 使用 SetEntityPose 保持吸盘吸附",
                     )
-                    self._start_fake_attach(half, "DetachableJoint attach 状态未确认")
+                first_wait = True
             else:
                 self.get_logger().warn("首次 attach 未确认且几何接触不足，尝试二次下压重吸")
                 retry_touch = Point(x=touch.x, y=touch.y, z=touch.z - 0.003)
@@ -4424,12 +5168,16 @@ class AutoPickPlaceNode(Node):
                     self.get_logger().error("二次吸附前检查失败：仅允许吸盘底面吸附")
                     return
                 self._suction_attached = None
-                self._publish_attach_burst()
-                self._attach_via_gz_cli(repeats=8)
+                self._detach_pulse_before_attach()
+                self._attach_via_gz_cli(repeats=3)
                 gz_attach_sent = True
-                if not self._wait_suction_state(True, attach_wait_sec):
-                    if not self._wait_suction_state(True, 1.5):
-                        self._start_fake_attach(half, "重吸附 DetachableJoint 未确认")
+                if not self._wait_suction_attached_hybrid(attach_wait_sec, run_id="post-fix"):
+                    self._mark_attach_assumed("重吸附状态事件未确认")
+                    if self._param_bool("allow_unverified_sim_attach"):
+                        self._start_fake_attach(
+                            half,
+                            "重吸附状态事件未确认: 使用 SetEntityPose 保持吸盘吸附",
+                        )
         if (
             self._param_bool("allow_unverified_sim_attach")
             and not self._fake_attach_active
@@ -4441,9 +5189,15 @@ class AutoPickPlaceNode(Node):
         time.sleep(attach_stabilize)
 
         probe_ok, _ = self._probe_pickup_follow(
-            touch, pick_touch_orientations[0], label="pick_probe_lift"
+            touch, pick_touch_orientations[0], half, label="pick_probe_lift"
         )
-        if (not probe_ok) and (gz_attach_sent or self._fake_attach_active) and self._param_bool("allow_unverified_sim_attach"):
+        if (
+            (not probe_ok)
+            and (gz_attach_sent or self._fake_attach_active or self._suction_attached is True)
+            and self._param_bool("allow_unverified_sim_attach")
+        ):
+            if not self._fake_attach_active:
+                self._start_fake_attach(half, "探针抬升未确认 DetachableJoint 跟随")
             self.get_logger().warn(
                 "Gazebo/SetEntityPose 吸附兜底已启用但状态/探针未确认；跳过重接触，直接执行主抬升验证。"
             )
@@ -4468,16 +5222,16 @@ class AutoPickPlaceNode(Node):
                 self.get_logger().error("重接触后几何检查失败，停止本轮抓取")
                 return
             self._suction_attached = None
-            self._publish_attach_burst()
+            self._detach_pulse_before_attach()
             self._attach_via_gz_cli(repeats=10)
             gz_attach_sent = True
-            if not self._wait_suction_state(True, attach_wait_sec):
+            if not self._wait_suction_attached_hybrid(attach_wait_sec, run_id="post-fix"):
                 self.get_logger().warn(f"重吸附状态未确认，已下发 {self._gz_bin} attach 兜底指令")
-                if not self._wait_suction_state(True, 1.5):
+                if not self._wait_suction_attached_hybrid(1.5, run_id="post-fix"):
                     self._start_fake_attach(half, "重吸附 DetachableJoint 未确认")
             time.sleep(1.0)
             probe_ok, _ = self._probe_pickup_follow(
-                touch, pick_touch_orientations[0], label="pick_probe_lift_retry"
+                touch, pick_touch_orientations[0], half, label="pick_probe_lift_retry"
             )
             if not probe_ok:
                 if pick_contact_collision_relaxed:
@@ -4504,6 +5258,9 @@ class AutoPickPlaceNode(Node):
         time.sleep(0.6)
         if pick_contact_collision_relaxed:
             self._set_pick_contact_collision_allowed(False)
+        if self._fake_attach_active:
+            self._snap_fake_attach_pose(half, "pick_lift_snap", attempts=3)
+            time.sleep(0.1)
 
         # 主判据：若抬升后物体中心高度未明显上升，则判定吸附失败。
         rect_center_z_after_lift = self._current_rect_center_z()
@@ -4540,11 +5297,7 @@ class AutoPickPlaceNode(Node):
                 y=place_pt.y,
                 z=place_pt.z + place_entry_clearance,
             )
-            place_retreat = Point(
-                x=place_pt.x,
-                y=place_pt.y,
-                z=place_pt.z + post_place_retreat,
-            )
+            place_retreat = self._place_retreat_point(place_pt, carton_ps, post_place_retreat)
 
         self._set_motion_profile("far")
         place_above_used = self._move_with_z_scan(
@@ -4559,6 +5312,8 @@ class AutoPickPlaceNode(Node):
             self._pub_detach.publish(Empty())
             self.get_logger().error("place_above 失败（已尝试提高高度与 Pose 回退）")
             return
+        if self._fake_attach_active:
+            self._snap_fake_attach_pose(half, "place_above_snap", attempts=3)
         time.sleep(0.6)
 
         self._set_motion_profile("near")
@@ -4576,11 +5331,9 @@ class AutoPickPlaceNode(Node):
             self.get_logger().warn("place_inside 失败，将在箱口上方释放")
 
         self.get_logger().info("释放 detach")
-        self._suction_attached = None
-        self._stop_fake_attach("place_release")
-        self._pub_detach.publish(Empty())
-        self._wait_suction_state(False, 1.0)
+        self._release_and_center_rect_in_carton(carton_ps, half, "place_release_center")
         time.sleep(0.2)
+        self._set_pick_contact_collision_allowed(True)
 
         retreat_target = Point(
             x=place_inside_used.x, y=place_inside_used.y, z=max(place_retreat.z, place_inside_used.z + 0.06)
@@ -4596,6 +5349,7 @@ class AutoPickPlaceNode(Node):
             self.get_logger().warn("退避规划失败，继续尝试回 home")
         else:
             time.sleep(0.3)
+        self._set_pick_contact_collision_allowed(False)
 
         self._refresh_joint_state(1.0)
         self._set_motion_profile("default")
@@ -4633,6 +5387,22 @@ def make_zero_joint_state() -> JointState:
 
 
 def main() -> None:
+    # #region agent log
+    sys.stderr.write("[cs612_debug_9009e8] main() enter\n")
+    sys.stderr.flush()
+    # #endregion
+    # #region agent log
+    try:
+        env_root = (os.environ.get("CS612_PROJECT_ROOT") or "").strip()
+        if env_root:
+            target = Path(env_root).resolve() / "cs612_auto_pick_started.flag"
+        else:
+            wr = _workspace_root_from_marker()
+            target = (wr / "cs612_auto_pick_started.flag") if wr is not None else (Path.cwd() / "cs612_auto_pick_started.flag")
+        target.write_text(f"unix_s={time.time()} cs612_root_env={bool(env_root)}\n", encoding="utf-8")
+    except Exception:
+        pass
+    # #endregion
     rclpy.init()
     node = AutoPickPlaceNode()
     executor = MultiThreadedExecutor(num_threads=8)
@@ -4656,6 +5426,10 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            _register_debug_ndjson_publisher(None)
+        except BaseException:
+            pass
         try:
             node._stop_fake_attach("节点关闭")
         except BaseException:

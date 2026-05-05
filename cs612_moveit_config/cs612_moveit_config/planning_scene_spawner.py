@@ -20,7 +20,7 @@ import tf2_ros
 import yaml
 from tf2_geometry_msgs import do_transform_pose
 from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
-from moveit_msgs.msg import CollisionObject, PlanningScene
+from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningScene
 from moveit_msgs.srv import ApplyPlanningScene
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -122,9 +122,9 @@ class PlanningSceneSpawner(Node):
         r = self._cfg.get("rect_pickup") or {}
         cbox = self._cfg.get("carton_box") or {}
         self._rect_size: list[float] = list(r.get("size_xyz", [0.20, 0.14, 0.08]))
-        self._carton_outer = [0.28, 0.22, 0.13]
-        self._carton_wall_t = 0.008
-        self._carton_floor_t = 0.006
+        self._carton_outer = list(cbox.get("outer_size_xyz", [0.42, 0.30, 0.22]))
+        self._carton_wall_t = float(cbox.get("wall_thickness", 0.008))
+        self._carton_floor_t = float(cbox.get("floor_thickness", 0.006))
         self._ground_size = [4.0, 4.0]
         self._ground_thickness = 0.02
         cp = cbox.get("model_pose_xyz", [0.82, -0.32, 0.0])
@@ -145,9 +145,13 @@ class PlanningSceneSpawner(Node):
 
         self._rect: PoseStamped | None = None
         self._carton: PoseStamped | None = None
-        self._suction_attached = False
+        self._gz_suction_attached = False
+        self._assumed_suction_attached = False
+        self._prev_suction_attached = False
         self._visual_attached = False
+        self._attach_offset: Pose | None = None
         self._applied_revision: int | None = None
+
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
@@ -176,6 +180,7 @@ class PlanningSceneSpawner(Node):
             qos_profile_sensor_data,
         )
         self.create_subscription(Bool, "/cs612/suction/state", self._on_suction_state, qos_profile_sensor_data)
+        self.create_subscription(Bool, "/cs612/suction/assumed_state", self._on_assumed_state, qos_profile_sensor_data)
         self.create_subscription(
             Bool,
             "/cs612/suction/attached_visual_state",
@@ -190,6 +195,10 @@ class PlanningSceneSpawner(Node):
         # Gazebo 中物体会因接触/推挤产生小位移；规划场景默认持续同步，避免 RViz 与 Gazebo 位置漂移。
         self.declare_parameter("continuous_scene_sync", True)
         self.create_timer(1.5, self._tick)
+
+    @property
+    def _suction_attached(self) -> bool:
+        return self._gz_suction_attached or self._assumed_suction_attached
 
     def _on_rect(self, msg: PoseStamped) -> None:
         p = msg.pose.position
@@ -232,10 +241,47 @@ class PlanningSceneSpawner(Node):
             self._on_carton(carton)
 
     def _on_suction_state(self, msg: Bool) -> None:
-        self._suction_attached = bool(msg.data)
+        was = self._suction_attached
+        self._gz_suction_attached = bool(msg.data)
+        if self._suction_attached and not was:
+            self._record_attach_offset()
+
+    def _on_assumed_state(self, msg: Bool) -> None:
+        # auto_pick_place.py 在 Gazebo state 不可靠时通过 assumed_state 主动声明 attach/detach
+        was = self._suction_attached
+        self._assumed_suction_attached = bool(msg.data)
+        self.get_logger().info(
+            f"收到 assumed_state: {self._assumed_suction_attached} (suction_attached 变为 {self._suction_attached})"
+        )
+        if self._suction_attached and not was:
+            self._record_attach_offset()
 
     def _on_visual_attached(self, msg: Bool) -> None:
         self._visual_attached = bool(msg.data)
+
+    def _record_attach_offset(self) -> None:
+        """记录 attach 瞬间 rect_pickup 相对于 suction_tcp_link 的位姿。"""
+        if self._rect is None:
+            self.get_logger().warn("无法记录 attach 偏移: rect_pose 尚未收到")
+            return
+        try:
+            from rclpy.duration import Duration as RclDuration
+
+            # 获取 base_link -> suction_tcp_link（即 suction_tcp_link 在 base_link 下的位姿）
+            tf = self._tf_buffer.lookup_transform(
+                "suction_tcp_link",
+                "base_link",
+                rclpy.time.Time(),
+                timeout=RclDuration(seconds=0.5),
+            )
+            rect_ps = self._effective_rect()
+            self._attach_offset = do_transform_pose(rect_ps.pose, tf)
+            self.get_logger().info(
+                f"记录 attach 偏移: suction_tcp_link 下 ({self._attach_offset.position.x:.4f}, "
+                f"{self._attach_offset.position.y:.4f}, {self._attach_offset.position.z:.4f})"
+            )
+        except Exception as e:
+            self.get_logger().warn(f"无法记录 attach 偏移: {e}")
 
     def _effective_rect(self) -> PoseStamped:
         ps = self._rect if self._rect is not None else self._rect_fallback
@@ -262,7 +308,11 @@ class PlanningSceneSpawner(Node):
                 rclpy.time.Time(),
                 timeout=RclDuration(seconds=0.2),
             )
-            return do_transform_pose(ps, tf)
+            out = PoseStamped()
+            out.header.frame_id = "base_link"
+            out.header.stamp = ps.header.stamp
+            out.pose = do_transform_pose(ps.pose, tf)
+            return out
         except Exception:
             out = PoseStamped()
             out.header.frame_id = "base_link"
@@ -334,6 +384,35 @@ class PlanningSceneSpawner(Node):
         )
         return objects
 
+    def _build_attached_object(self) -> AttachedCollisionObject | None:
+        """构造随机械臂同步的 AttachedCollisionObject（物理吸住时使用）。"""
+        if not self._suction_attached:
+            return None
+        sx, sy, sz = [float(v) for v in self._rect_size]
+        aco = AttachedCollisionObject()
+        aco.link_name = "suction_tcp_link"
+        aco.object = CollisionObject()
+        aco.object.id = "scene_rect_pickup"
+        aco.object.header.frame_id = "suction_tcp_link"
+        aco.object.operation = CollisionObject.ADD
+        prim = SolidPrimitive()
+        prim.type = SolidPrimitive.BOX
+        prim.dimensions = [sx, sy, sz]
+        aco.object.primitives = [prim]
+        if self._attach_offset is not None:
+            aco.object.primitive_poses = [self._attach_offset]
+        else:
+            # 默认近似偏移（suction_tcp_link -> suction_cup_link 为 -0.0095，
+            # rect_pickup 半高 0.04，底部贴住 cup）
+            aco.object.primitive_poses = [
+                Pose(
+                    position=Point(x=0.0, y=0.0, z=-0.0495),
+                    orientation=Quaternion(x=0.0, y=0.0, z=0.0, w=1.0),
+                )
+            ]
+        aco.touch_links = ["suction_tcp_link", "suction_cup_link", "ee_link", "tool0"]
+        return aco
+
     def _stable_rev(self) -> int:
         """仿真位姿有微小抖动，用厘米级量化避免无意义重复 apply。"""
         r = self._effective_rect().pose.position
@@ -396,6 +475,19 @@ class PlanningSceneSpawner(Node):
         scene = PlanningScene()
         scene.is_diff = True
         scene.world.collision_objects = self._build_objects()
+        attached = self._build_attached_object()
+        if attached is not None:
+            scene.robot_state.is_diff = True
+            scene.robot_state.attached_collision_objects = [attached]
+        else:
+            # 显式发送 REMOVE，确保之前残留的 attached object 被清除
+            scene.robot_state.is_diff = True
+            aco_remove = AttachedCollisionObject()
+            aco_remove.link_name = "suction_tcp_link"
+            aco_remove.object = CollisionObject()
+            aco_remove.object.id = "scene_rect_pickup"
+            aco_remove.object.operation = CollisionObject.REMOVE
+            scene.robot_state.attached_collision_objects = [aco_remove]
         req = ApplyPlanningScene.Request()
         req.scene = scene
         self._pending_rev = rev

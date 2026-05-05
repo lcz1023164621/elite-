@@ -62,11 +62,11 @@ class WorldMarkersNode(Node):
         self.declare_parameter("rect_size_xyz", [0.20, 0.14, 0.08])
         self.declare_parameter("approach_clearance", 0.06)
         self.declare_parameter("suction_contact_offset_z", 0.214)
-        self.declare_parameter("carton_outer_size_xyz", [0.28, 0.22, 0.13])
+        self.declare_parameter("carton_outer_size_xyz", [0.42, 0.30, 0.22])
         self.declare_parameter("carton_wall_thickness", 0.008)
         self.declare_parameter("carton_floor_thickness", 0.006)
         self.declare_parameter("carton_floor_top_z", 0.006)
-        self.declare_parameter("place_height_above_floor", 0.12)
+        self.declare_parameter("place_height_above_floor", 0.18)
         self.declare_parameter("carton_fallback_pose_xyz", [0.82, -0.32, 0.0])
         self.declare_parameter("use_scene_yaml_fallback", True)
 
@@ -381,7 +381,7 @@ class WorldMarkersNode(Node):
         wall_t = float(self.get_parameter("carton_wall_thickness").value)
         floor_t = float(self.get_parameter("carton_floor_thickness").value)
         if sx <= 0.0 or sy <= 0.0 or sz <= 0.0 or wall_t <= 0.0 or floor_t <= 0.0:
-            sx, sy, sz, wall_t, floor_t = 0.28, 0.22, 0.13, 0.008, 0.006
+            sx, sy, sz, wall_t, floor_t = 0.42, 0.30, 0.22, 0.008, 0.006
 
         half_x = 0.5 * sx
         half_y = 0.5 * sy

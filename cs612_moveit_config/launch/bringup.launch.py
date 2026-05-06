@@ -1,5 +1,6 @@
 """CS612 Gazebo + MoveIt bringup using the official Elite CS ROS 2 stack."""
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -24,11 +25,20 @@ _ARM_JOINTS = [
     "wrist_2_joint",
     "wrist_3_joint",
 ]
-_DEBUG_LOG_PATH = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-cfd510.log")
-_DEBUG_SESSION_ID = "cfd510"
+_DEBUG_LOG_PATH = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-a97e6b.log")
+_DEBUG_SESSION_ID = "a97e6b"
 _AGENT_9009e8_ID = "9009e8"
 # 与 auto_pick_place._IDE_CURSOR_MIRROR_LOG 一致：便于对照 launch 子进程与 Cursor 工作区是否同一挂载
 _IDE_CURSOR_AGENT_LOG = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-9009e8.log")
+
+
+def _append_line(path: Path, line: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
 
 
 def _debug_log_9009e8_bridge(project_root: Path, data: dict) -> None:
@@ -43,6 +53,7 @@ def _debug_log_9009e8_bridge(project_root: Path, data: dict) -> None:
         "timestamp": int(time.time() * 1000),
     }
     line = json.dumps(payload, ensure_ascii=True) + "\n"
+    _append_line(_DEBUG_LOG_PATH, line)
     paths = [project_root / ".cursor" / "debug-9009e8.log", _IDE_CURSOR_AGENT_LOG]
     seen: set[str] = set()
     for p in paths:
@@ -51,9 +62,7 @@ def _debug_log_9009e8_bridge(project_root: Path, data: dict) -> None:
             if key in seen:
                 continue
             seen.add(key)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            with p.open("a", encoding="utf-8") as f:
-                f.write(line)
+            _append_line(p, line)
         except Exception:
             pass
 
@@ -68,12 +77,25 @@ def _debug_log(location: str, message: str, hypothesis_id: str, data: dict) -> N
         "data": data,
         "timestamp": int(time.time() * 1000),
     }
-    try:
-        _DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
+    line = json.dumps(payload, ensure_ascii=True) + "\n"
+    candidates = [
+        _DEBUG_LOG_PATH,
+        Path.cwd() / ".cursor" / "debug-a97e6b.log",
+        Path("/tmp/cs612_runtime/home/.cursor/debug-a97e6b.log"),
+    ]
+    env_path = os.environ.get("CS612_DEBUG_NDJSON_PATH", "").strip()
+    if env_path:
+        candidates.append(Path(env_path))
+    seen: set[str] = set()
+    for p in candidates:
+        try:
+            key = str(p.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            _append_line(p, line)
+        except Exception:
+            pass
 
 
 def _load_yaml(path: Path) -> dict:
@@ -143,6 +165,23 @@ def _launch_setup(context, *args, **kwargs):
     rviz_config_file = Path(rviz_config_value)
     if not rviz_config_file.is_absolute():
         rviz_config_file = moveit_config_dir / "config" / rviz_config_value
+    rviz_fixed_frame = "unknown"
+    rviz_static_models: dict[str, bool] = {}
+    try:
+        rviz_cfg = _load_yaml(rviz_config_file)
+        vm = rviz_cfg.get("Visualization Manager", {}) if isinstance(rviz_cfg, dict) else {}
+        go = vm.get("Global Options", {}) if isinstance(vm, dict) else {}
+        rviz_fixed_frame = str(go.get("Fixed Frame", "unknown"))
+        displays = vm.get("Displays", []) if isinstance(vm, dict) else []
+        if isinstance(displays, list):
+            for d in displays:
+                if not isinstance(d, dict):
+                    continue
+                name = str(d.get("Name", ""))
+                if name in ("StaticArm2RobotModel", "StaticArm3RobotModel"):
+                    rviz_static_models[name] = bool(d.get("Enabled", False))
+    except Exception:
+        pass
     # #region agent log
     _debug_log(
         "bringup.launch.py:_launch_setup",
@@ -154,6 +193,15 @@ def _launch_setup(context, *args, **kwargs):
             "auto_pick": auto_pick.perform(context),
             "rviz_config": str(rviz_config_file),
             "world_file_exists": world_file.is_file(),
+        },
+    )
+    _debug_log(
+        "bringup.launch.py:_launch_setup",
+        "rviz_display_config",
+        "H9",
+        {
+            "fixed_frame": rviz_fixed_frame,
+            "static_models_enabled": rviz_static_models,
         },
     )
     try:
@@ -191,6 +239,97 @@ def _launch_setup(context, *args, **kwargs):
             {"publish_robot_description": True},
         ],
     )
+
+    static_arm_ns_poses = {
+        "cs612_static_2": ("2.01650", "-0.71094", "0.00141"),
+        "cs612_static_3": ("2.60725", "-0.99329", "0.03013"),
+    }
+    static_robot_state_publishers = [
+        Node(
+            package="robot_state_publisher",
+            executable="robot_state_publisher",
+            namespace=ns,
+            output="both",
+            parameters=[
+                robot_description,
+                {"use_sim_time": False},
+                {"publish_robot_description": True},
+                {"frame_prefix": f"{ns}/"},
+                # 仅靠 joint_states；仿真心跳/stamp 漂移时避免因时间戳拒发 TF
+                {"ignore_timestamp": True},
+                {"publish_frequency": 50.0},
+            ],
+            remappings=[
+                ("tf", "/tf"),
+                ("tf_static", "/tf_static"),
+            ],
+        )
+        for ns in static_arm_ns_poses
+    ]
+    static_world_tfs = [
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name=f"{ns}_world_anchor",
+            arguments=[
+                "--x",
+                xyz[0],
+                "--y",
+                xyz[1],
+                "--z",
+                xyz[2],
+                "--qx",
+                "0",
+                "--qy",
+                "0",
+                "--qz",
+                "0",
+                "--qw",
+                "1",
+                "--frame-id",
+                "world",
+                "--child-frame-id",
+                f"{ns}/world",
+            ],
+            parameters=[{"use_sim_time": use_sim_time}],
+            output="log",
+        )
+        for ns, xyz in static_arm_ns_poses.items()
+    ]
+
+    static_arm_joint_publishers = [
+        ExecuteProcess(
+            cmd=[
+                "/usr/bin/python3",
+                "-m",
+                "cs612_moveit_config.static_arm_state",
+                "--ros-args",
+                "-r",
+                f"__ns:=/{ns}",
+                "-p",
+                "publish_hz:=50.0",
+                "-p",
+                "use_sim_time:=false",
+            ],
+            output="screen",
+        )
+        for ns in static_arm_ns_poses
+    ]
+    # #region agent log
+    _debug_log(
+        "bringup.launch.py:_launch_setup",
+        "static_arm_publishers_configured",
+        "H3",
+        {
+            "namespaces": list(static_arm_ns_poses.keys()),
+            "world_children": [f"{ns}/world" for ns in static_arm_ns_poses],
+            "rsp_frame_prefix_mode": "tf_namespace_slash",
+            "static_arm_use_sim_time": False,
+            "joint_state_executable": "cs612_static_arm_state",
+            "joint_state_exec_mode": "/usr/bin/python3 -m cs612_moveit_config.static_arm_state",
+        },
+    )
+    # #endregion
 
     joint_state_broadcaster = Node(
         package="controller_manager",
@@ -372,7 +511,18 @@ def _launch_setup(context, *args, **kwargs):
         robot_state_publisher,
         TimerAction(period=2.0, actions=[spawn_robot]),
         TimerAction(period=4.0, actions=[joint_state_broadcaster, joint_trajectory_controller, gz_bridge, gz_set_pose_bridge]),
-        TimerAction(period=5.0, actions=[move_group, *helpers, rviz]),
+        TimerAction(
+            period=5.0,
+            actions=[
+                move_group,
+                *helpers,
+                rviz,
+                # 次序：锚定 → joint_states → RSP（避免订阅晚于首轮关节消息）
+                *static_world_tfs,
+                *static_arm_joint_publishers,
+                *static_robot_state_publishers,
+            ],
+        ),
         TimerAction(period=ap_delay, actions=[auto_pick_node], condition=IfCondition(auto_pick)),
         RegisterEventHandler(
             OnProcessExit(

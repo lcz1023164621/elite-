@@ -191,6 +191,27 @@
     <!-- 机器人由 cs612_moveit_config/launch/bringup.launch.py 通过官方 Elite Xacro
          和 ros_gz_sim create 生成，避免与旧 model://CS612 重复生成两台机械臂。 -->
 
+    <!--
+      多机械臂布局参考：
+      1 号机械臂仍由 bringup.launch.py 动态生成在 base_link/world 原点。
+      2/3 号为 models/CS612_static：CS612 连杆 + 自定义吸盘的静态展示模型，由 include pose 放置；
+      不参与 ros2_control / MoveIt / 吸附话题。
+      Gazebo 俯视关系：1 号左上，2 号中右，3 号右下。
+    -->
+    <include>
+      <name>cs612_static_2</name>
+      <uri>model://CS612_static</uri>
+      <!-- 1 -> 2: x=2016.50mm, top-view y=-710.94mm, z=1.41mm -->
+      <pose>2.01650 -0.71094 0.00141 0 0 0</pose>
+    </include>
+
+    <include>
+      <name>cs612_static_3</name>
+      <uri>model://CS612_static</uri>
+      <!-- 1 -> 3: x=2607.25mm, top-view y=-993.29mm, z=30.13mm -->
+      <pose>2.60725 -0.99329 0.03013 0 0 0</pose>
+    </include>
+
     <!-- GUI 配置：内嵌 JointPositionController 面板 -->
     <gui fullscreen="0">
 

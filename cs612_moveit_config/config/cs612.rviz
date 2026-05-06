@@ -80,7 +80,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Marker Topic:
-        Depth: 5
+        Depth: 50
         Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
@@ -88,8 +88,54 @@ Visualization Manager:
       Name: WorldMarkers
       Namespaces:
         {}
-      Queue Size: 10
+      Queue Size: 50
       Value: true
+    - Alpha: 0.92
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /cs612_static_2/robot_description
+      Enabled: true
+      Links:
+        All Links Enabled: true
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        Link Tree Style: Links in Alphabetic Order
+      Name: StaticArm2RobotModel
+      TF Prefix: cs612_static_2
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
+    - Alpha: 0.92
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /cs612_static_3/robot_description
+      Enabled: true
+      Links:
+        All Links Enabled: true
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        Link Tree Style: Links in Alphabetic Order
+      Name: StaticArm3RobotModel
+      TF Prefix: cs612_static_3
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
     - Class: moveit_rviz_plugin/MotionPlanning
       Enabled: true
       Move Group Namespace: ""
@@ -165,7 +211,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 207; 207; 207
-    Fixed Frame: base_link
+    Fixed Frame: world
     Frame Rate: 30
   Name: root
   Tools:

@@ -1,0 +1,235 @@
+<?xml version="1.0"?>
+<!-- 纯静态参考模型：用于多臂布局可视化，不参与物理、无 ros2_control、无碰檫 -->
+<sdf version="1.7">
+  <model name="CS612_static">
+    <static>true</static>
+
+    <!-- base_link -->
+    <link name="base_link">
+      <visual name="base_link_visual">
+        <geometry>
+          <mesh>
+            <uri>file:///mnt/e/gazebo_projects/my_first_world/elite_ros_ws/install/eli_cs_robot_description/share/eli_cs_robot_description/meshes/cs612/visual/base.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+
+    <!-- 以下 fixed 位姿由 URDF 关节链 + 初始关节角（与动态臂 spawn 一致）前向运动学固化 -->
+
+    <joint name="shoulder_pan_fixed" type="fixed">
+      <pose relative_to="base_link">0 0 0.193 0 0 0</pose>
+      <parent>base_link</parent>
+      <child>shoulder_link</child>
+    </joint>
+
+    <link name="shoulder_link">
+      <pose relative_to="shoulder_pan_fixed">0 0 0 0 0 0</pose>
+      <visual name="shoulder_link_visual">
+        <geometry>
+          <mesh>
+            <uri>file:///mnt/e/gazebo_projects/my_first_world/elite_ros_ws/install/eli_cs_robot_description/share/eli_cs_robot_description/meshes/cs612/visual/shoulder.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+
+    <joint name="shoulder_lift_fixed" type="fixed">
+      <pose relative_to="shoulder_link">0 0 0 -2.35619449 1.57079113 2.35619449</pose>
+      <parent>shoulder_link</parent>
+      <child>upperarm_link</child>
+    </joint>
+
+    <link name="upperarm_link">
+      <pose relative_to="shoulder_lift_fixed">0 0 0 0 0 0</pose>
+      <visual name="upperarm_link_visual">
+        <geometry>
+          <mesh>
+            <uri>file:///mnt/e/gazebo_projects/my_first_world/elite_ros_ws/install/eli_cs_robot_description/share/eli_cs_robot_description/meshes/cs612/visual/upperarm.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+
+    <joint name="elbow_fixed" type="fixed">
+      <pose relative_to="upperarm_link">-0.615 0 0 0 0 0</pose>
+      <parent>upperarm_link</parent>
+      <child>forearm_link</child>
+    </joint>
+
+    <link name="forearm_link">
+      <pose relative_to="elbow_fixed">0 0 0 0 0 0</pose>
+      <visual name="forearm_link_visual">
+        <geometry>
+          <mesh>
+            <uri>file:///mnt/e/gazebo_projects/my_first_world/elite_ros_ws/install/eli_cs_robot_description/share/eli_cs_robot_description/meshes/cs612/visual/forearm.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+
+    <joint name="wrist_1_fixed" type="fixed">
+      <pose relative_to="forearm_link">-0.571 0 0.1775 0 0 -1.5708</pose>
+      <parent>forearm_link</parent>
+      <child>wrist_1_link</child>
+    </joint>
+
+    <link name="wrist_1_link">
+      <pose relative_to="wrist_1_fixed">0 0 0 0 0 0</pose>
+      <visual name="wrist_1_link_visual">
+        <geometry>
+          <mesh>
+            <uri>file:///mnt/e/gazebo_projects/my_first_world/elite_ros_ws/install/eli_cs_robot_description/share/eli_cs_robot_description/meshes/cs612/visual/wrist1.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+
+    <joint name="wrist_2_fixed" type="fixed">
+      <pose relative_to="wrist_1_link">0 -0.118 0 -2.35619449 -1.57079113 -2.35619449</pose>
+      <parent>wrist_1_link</parent>
+      <child>wrist_2_link</child>
+    </joint>
+
+    <link name="wrist_2_link">
+      <pose relative_to="wrist_2_fixed">0 0 0 0 0 0</pose>
+      <visual name="wrist_2_link_visual">
+        <geometry>
+          <mesh>
+            <uri>file:///mnt/e/gazebo_projects/my_first_world/elite_ros_ws/install/eli_cs_robot_description/share/eli_cs_robot_description/meshes/cs612/visual/wrist2.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+
+    <joint name="wrist_3_fixed" type="fixed">
+      <pose relative_to="wrist_2_link">0 0.1103 0 -1.5708 0 0</pose>
+      <parent>wrist_2_link</parent>
+      <child>wrist_3_link</child>
+    </joint>
+
+    <link name="wrist_3_link">
+      <pose relative_to="wrist_3_fixed">0 0 0 0 0 0</pose>
+      <visual name="wrist_3_link_visual">
+        <geometry>
+          <mesh>
+            <uri>file:///mnt/e/gazebo_projects/my_first_world/elite_ros_ws/install/eli_cs_robot_description/share/eli_cs_robot_description/meshes/cs612/visual/wrist3.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+
+    <joint name="fixed_suction_cup" type="fixed">
+      <pose relative_to="wrist_3_link">0 0 0 0 0 0</pose>
+      <parent>wrist_3_link</parent>
+      <child>suction_cup_link</child>
+    </joint>
+
+    <link name="suction_cup_link">
+      <pose relative_to="fixed_suction_cup">0 0 0 0 0 0</pose>
+      <visual name="suction_cup_visual">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>file:///mnt/e/gazebo_projects/my_first_world/install/CS612urdf/share/CS612urdf/meshes/ee_111_repaired.stl</uri>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.76 0.78 0.80 1.0</ambient>
+          <diffuse>0.72 0.74 0.76 1.0</diffuse>
+          <specular>0.36 0.36 0.36 1.0</specular>
+          <emissive>0 0 0 1.0</emissive>
+        </material>
+      </visual>
+      <visual name="suction_piston_left">
+        <pose>-0.018 0 0.206 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.010</length>
+            <radius>0.003</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.76 0.78 0.80 1.0</ambient>
+          <diffuse>0.76 0.78 0.80 1.0</diffuse>
+        </material>
+      </visual>
+      <visual name="suction_piston_right">
+        <pose>0.018 0 0.206 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.010</length>
+            <radius>0.003</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.76 0.78 0.80 1.0</ambient>
+          <diffuse>0.76 0.78 0.80 1.0</diffuse>
+        </material>
+      </visual>
+      <visual name="suction_boot_left">
+        <pose>-0.018 0 0.211 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.006</length>
+            <radius>0.006</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.16 0.16 0.16 0.98</ambient>
+          <diffuse>0.16 0.16 0.16 0.98</diffuse>
+        </material>
+      </visual>
+      <visual name="suction_boot_right">
+        <pose>0.018 0 0.211 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.006</length>
+            <radius>0.006</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.16 0.16 0.16 0.98</ambient>
+          <diffuse>0.16 0.16 0.16 0.98</diffuse>
+        </material>
+      </visual>
+      <visual name="suction_lip_left">
+        <pose>-0.018 0 0.214 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.003</length>
+            <radius>0.009</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.08 0.08 0.08 1.0</ambient>
+          <diffuse>0.08 0.08 0.08 1.0</diffuse>
+        </material>
+      </visual>
+      <visual name="suction_lip_right">
+        <pose>0.018 0 0.214 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.003</length>
+            <radius>0.009</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.08 0.08 0.08 1.0</ambient>
+          <diffuse>0.08 0.08 0.08 1.0</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="fixed_suction_tcp" type="fixed">
+      <pose relative_to="suction_cup_link">0 0 0.214 0 0 0</pose>
+      <parent>suction_cup_link</parent>
+      <child>suction_tcp_link</child>
+    </joint>
+
+    <link name="suction_tcp_link">
+      <pose relative_to="fixed_suction_tcp">0 0 0 0 0 0</pose>
+    </link>
+
+  </model>
+</sdf>

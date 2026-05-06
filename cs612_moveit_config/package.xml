@@ -29,6 +29,7 @@
   <exec_depend>ros_gz_bridge</exec_depend>
   <exec_depend>ros_gz_interfaces</exec_depend>
   <exec_depend>eli_cs_robot_description</exec_depend>
+  <exec_depend>CS612urdf</exec_depend>
   <exec_depend>eli_cs_robot_moveit_config</exec_depend>
   <exec_depend>eli_cs_robot_simulation_gz</exec_depend>
   <exec_depend>tf2_ros</exec_depend>

@@ -127,7 +127,7 @@ class PlanningSceneSpawner(Node):
         self._carton_floor_t = float(cbox.get("floor_thickness", 0.006))
         self._ground_size = [4.0, 4.0]
         self._ground_thickness = 0.02
-        cp = cbox.get("model_pose_xyz", [0.82, -0.32, 0.0])
+        cp = cbox.get("model_pose_xyz", [-0.82, 0.30, 0.0])
         self._carton_fallback = PoseStamped()
         self._carton_fallback.header.frame_id = "base_link"
         self._carton_fallback.pose.position = Point(
@@ -135,7 +135,7 @@ class PlanningSceneSpawner(Node):
         )
         self._carton_fallback.pose.orientation = _quat_from_rpy(0.0, 0.0, 0.0)
 
-        rc = r.get("center_xyz", [0.68, 0.16, 0.03])
+        rc = r.get("center_xyz", [-0.82, 0.30, 0.046])
         self._rect_fallback = PoseStamped()
         self._rect_fallback.header.frame_id = "base_link"
         self._rect_fallback.pose.position = Point(

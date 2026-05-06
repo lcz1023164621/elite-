@@ -384,9 +384,10 @@ class StageName(Enum):
     HOME = auto()
 
 
-def _load_scene_fallback_xyz() -> tuple[list[float], list[float]]:
-    rect_xyz = [0.56, 0.18, 0.03]
-    carton_xyz = [0.74, -0.28, 0.0]
+def _load_scene_fallback_xyz() -> tuple[list[float], list[float], list[float]]:
+    rect_xyz = [-0.82, 0.30, 0.046]
+    carton_xyz = [-0.82, 0.30, 0.0]
+    place_xyz = [0.82, -0.30, 0.0]
     try:
         from ament_index_python.packages import get_package_share_directory
 
@@ -395,15 +396,19 @@ def _load_scene_fallback_xyz() -> tuple[list[float], list[float]]:
             doc = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
             rect = doc.get("rect_pickup") or {}
             carton = doc.get("carton_box") or {}
+            place = doc.get("place_target") or {}
             rect_center = rect.get("center_xyz")
             carton_center = carton.get("model_pose_xyz")
+            place_target = place.get("tcp_xyz") or place.get("xyz") or carton.get("target_xyz")
             if isinstance(rect_center, list) and len(rect_center) == 3:
                 rect_xyz = [float(rect_center[0]), float(rect_center[1]), float(rect_center[2])]
             if isinstance(carton_center, list) and len(carton_center) == 3:
                 carton_xyz = [float(carton_center[0]), float(carton_center[1]), float(carton_center[2])]
+            if isinstance(place_target, list) and len(place_target) == 3:
+                place_xyz = [float(place_target[0]), float(place_target[1]), float(place_target[2])]
     except Exception:
         pass
-    return rect_xyz, carton_xyz
+    return rect_xyz, carton_xyz, place_xyz
 
 
 def _spin_future(node: Node, fut, timeout_sec: float, label: str, log_timeout: bool = True) -> bool:
@@ -469,6 +474,12 @@ def _flat_yaw_quat_from_tool_orientation(tool_q: Quaternion) -> Quaternion:
     x_axis = _quat_rotate_vec(tool_q, 1.0, 0.0, 0.0)
     yaw = math.atan2(float(x_axis[1]), float(x_axis[0]))
     return _quat_from_rpy(0.0, 0.0, yaw)
+
+
+def _quat_to_yaw(q: Quaternion) -> float:
+    """从四元数提取绕世界 Z 轴的 yaw（ZYX 欧拉角顺序）。"""
+    x, y, z, w = q.x, q.y, q.z, q.w
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 def _wrap_to_pi(angle: float) -> float:
@@ -739,7 +750,7 @@ class AutoPickPlaceNode(Node):
         sys.stderr.write("[cs612_debug_9009e8] AutoPickPlaceNode __init__ ok\n")
         sys.stderr.flush()
         # #endregion
-        rect_fb_xyz, carton_fb_xyz = _load_scene_fallback_xyz()
+        rect_fb_xyz, carton_fb_xyz, place_target_xyz = _load_scene_fallback_xyz()
         self._cb = ReentrantCallbackGroup()
         self._log_lock = threading.Lock()
         self._rect: PoseStamped | None = None
@@ -838,6 +849,8 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("use_direct_xyz", False)
         self.declare_parameter("pick_point_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter("place_point_xyz", [0.0, 0.0, 0.0])
+        self.declare_parameter("use_configured_place_target", True)
+        self.declare_parameter("configured_place_target_xyz", place_target_xyz)
         self.declare_parameter("cartesian_step_max_m", 0.008)
         self.declare_parameter("cartesian_step_max_rad", 0.12)
         self.declare_parameter("cartesian_cmd_period_sec", 0.050)
@@ -4689,9 +4702,12 @@ class AutoPickPlaceNode(Node):
         use_known_surface = self._param_bool("use_known_rect_surface_center")
         pick_xyz = self._param_xyz("pick_point_xyz")
         place_xyz = self._param_xyz("place_point_xyz")
+        configured_place_xyz = self._param_xyz("configured_place_target_xyz")
         known_rect_center = self._param_xyz("known_rect_center_xyz")
         known_rect_size = self._param_xyz("known_rect_size_xyz")
         carton_ps: PoseStamped | None = None
+        place_uses_carton_box = True
+        rect_yaw = 0.0
 
         if use_direct_xyz:
             if len(pick_xyz) != 3 or len(place_xyz) != 3:
@@ -4705,6 +4721,7 @@ class AutoPickPlaceNode(Node):
                 y=float(place_xyz[1]),
                 z=float(place_xyz[2]),
             )
+            place_uses_carton_box = False
         else:
             assert self._rect and self._carton
             r_ps = self._pose_to_base(self._rect)
@@ -4740,6 +4757,18 @@ class AutoPickPlaceNode(Node):
             touch = Point(x=top.x, y=top.y, z=top.z + suction_contact_offset - touch_dz)
             approach = Point(x=touch.x, y=touch.y, z=touch.z + clearance + hover_extra)
             place_pt = self._carton_place_point(carton_ps, floor_z, place_h)
+            if self._param_bool("use_configured_place_target") and len(configured_place_xyz) == 3:
+                place_pt = Point(
+                    x=float(configured_place_xyz[0]),
+                    y=float(configured_place_xyz[1]),
+                    z=float(configured_place_xyz[2]),
+                )
+                place_uses_carton_box = False
+                self.get_logger().info(
+                    "放置目标使用 scene_objects.yaml 配置点: "
+                    f"({place_pt.x:.3f},{place_pt.y:.3f},{place_pt.z:.3f})"
+                )
+            rect_yaw = _quat_to_yaw(r_ps.pose.orientation)
 
         pick_lift = Point(
             x=top.x,
@@ -4751,14 +4780,10 @@ class AutoPickPlaceNode(Node):
             start_pose = list(self.get_parameter("start_face_posture_hint").value)
             if len(start_pose) == 6:
                 start_pose = [float(v) for v in start_pose]
-                target_yaw = float(self.get_parameter("start_face_joint1_rad").value)
+                target_yaw = _wrap_to_pi(rect_yaw)
                 if self._param_bool("start_face_use_scene_midpoint_yaw"):
-                    aim_x = 0.5 * (top.x + place_pt.x)
-                    aim_y = 0.5 * (top.y + place_pt.y)
-                    if abs(aim_x) > 1e-6 or abs(aim_y) > 1e-6:
-                        world_yaw = math.atan2(aim_y, aim_x)
-                        yaw_offset = float(self.get_parameter("joint1_world_yaw_offset_rad").value)
-                        target_yaw = _wrap_to_pi(world_yaw + yaw_offset)
+                    # 使用 rect_pickup 实际 yaw，使末端矩形与物体平行，减少旋转
+                    target_yaw = _wrap_to_pi(rect_yaw)
                 start_pose[0] = target_yaw
                 start_pose_cmd = list(start_pose)
                 self.get_logger().info(
@@ -4865,15 +4890,10 @@ class AutoPickPlaceNode(Node):
                 "抓取策略: MoveIt 先到物体上方对齐，再用笛卡尔直线下压接触。"
             )
 
-        # 姿态搜索与目标方向联动，避免固定 yaw 导致的“反向分支”偏好。
-        pick_world_yaw = math.atan2(top.y, top.x)
-        place_world_yaw = math.atan2(place_pt.y, place_pt.x)
-        yaw_offset = float(self.get_parameter("joint1_world_yaw_offset_rad").value)
-        if start_pose_cmd is not None and self._param_bool("pick_yaw_follow_start_face"):
-            base_pick_yaw = _wrap_to_pi(float(start_pose_cmd[0]))
-        else:
-            base_pick_yaw = _wrap_to_pi(pick_world_yaw + yaw_offset)
-        base_place_yaw = _wrap_to_pi(place_world_yaw + yaw_offset)
+        # 末端执行器矩形与物体矩形对边平行、角对角对齐：
+        # 使用 rect_pickup 实际 yaw，抓取和放置保持同一朝向，移动中旋转最小。
+        base_pick_yaw = _wrap_to_pi(rect_yaw)
+        base_place_yaw = _wrap_to_pi(rect_yaw)
         yaw_delta_set = [0.0, 0.06, -0.06]
         pick_yaw_set = [_wrap_to_pi(base_pick_yaw + d) for d in yaw_delta_set]
         # 当前吸盘接触面定义为本地 +Z，抓取/放置时必须显式令其朝世界 -Z。
@@ -5352,14 +5372,31 @@ class AutoPickPlaceNode(Node):
                 "未收到实时 rect_pickup 位姿，跳过抬升后物体跟随高度验证（仿真 attach 兜底模式）"
             )
 
-        if carton_ps is not None:
+        place_release_target = place_pt
+
+        if carton_ps is not None and place_uses_carton_box:
             place_pt = self._adjust_place_point_for_box(place_pt, carton_ps, half)
+            place_release_target = place_pt
             place_above = Point(
                 x=place_pt.x,
                 y=place_pt.y,
                 z=place_pt.z + place_entry_clearance,
             )
             place_retreat = self._place_retreat_point(place_pt, carton_ps, post_place_retreat)
+        else:
+            # 地面放置：place_pt.z 代表地面高度，计算 TCP 接触点（使物体底面接触地面）
+            place_touch_z = place_pt.z + half[2] + suction_contact_offset
+            place_release_target = Point(x=place_pt.x, y=place_pt.y, z=place_touch_z)
+            place_above = Point(
+                x=place_pt.x,
+                y=place_pt.y,
+                z=place_touch_z + place_entry_clearance,
+            )
+            place_retreat = Point(
+                x=place_pt.x,
+                y=place_pt.y,
+                z=place_touch_z + post_place_retreat,
+            )
 
         self._set_motion_profile("far")
         place_above_used = self._move_with_z_scan(
@@ -5378,19 +5415,22 @@ class AutoPickPlaceNode(Node):
             self._snap_fake_attach_pose(half, "place_above_snap", attempts=3)
         time.sleep(0.6)
 
+        # 像抓取一样下降到底面接触后再释放，而不是空中直接扔下
         self._set_motion_profile("near")
         place_inside_used = self._move_with_z_scan(
-            place_pt,
+            place_release_target,
             place_orientations,
             [0.0, 0.02, 0.04, 0.06],
             mode="place",
-            label="place_inside",
+            label="place_touch" if not place_uses_carton_box else "place_inside",
         )
         if place_inside_used is not None:
             time.sleep(0.5)
         else:
             place_inside_used = place_above_used
-            self.get_logger().warn("place_inside 失败，将在箱口上方释放")
+            self.get_logger().warn(
+                "place_touch 失败，将在上方释放" if not place_uses_carton_box else "place_inside 失败，将在箱口上方释放"
+            )
 
         self.get_logger().info("释放 detach")
         self._release_rect_at_planned_place(

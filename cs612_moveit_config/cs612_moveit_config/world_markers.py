@@ -43,6 +43,25 @@ def _load_rect_fallback_from_share() -> tuple[list[float], list[float]] | None:
     return None
 
 
+def _load_carton_fallback_from_share() -> list[float] | None:
+    """与 worlds/my_world.sdf 同步的 carton_box 默认位姿。"""
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        share = Path(get_package_share_directory("cs612_moveit_config"))
+        cfg_path = share / "config" / "scene_objects.yaml"
+        if not cfg_path.is_file():
+            return None
+        cfg: dict[str, Any] = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        cbox = cfg.get("carton_box") or {}
+        pose = cbox.get("model_pose_xyz")
+        if isinstance(pose, list) and len(pose) == 3:
+            return [float(pose[0]), float(pose[1]), float(pose[2])]
+    except Exception:
+        pass
+    return None
+
+
 def _quat_rotate_vec(q: Quaternion, vx: float, vy: float, vz: float) -> tuple[float, float, float]:
     x, y, z = vx, vy, vz
     qx, qy, qz, qw = q.x, q.y, q.z, q.w
@@ -67,7 +86,7 @@ class WorldMarkersNode(Node):
         self.declare_parameter("carton_floor_thickness", 0.006)
         self.declare_parameter("carton_floor_top_z", 0.006)
         self.declare_parameter("place_height_above_floor", 0.18)
-        self.declare_parameter("carton_fallback_pose_xyz", [0.82, -0.32, 0.0])
+        self.declare_parameter("carton_fallback_pose_xyz", _load_carton_fallback_from_share() or [-0.82, 0.30, 0.0])
         self.declare_parameter("use_scene_yaml_fallback", True)
 
         self._rect: PoseStamped | None = None
@@ -182,7 +201,7 @@ class WorldMarkersNode(Node):
     def _fallback_carton_pose(self) -> PoseStamped:
         xyz = list(self.get_parameter("carton_fallback_pose_xyz").value)
         if len(xyz) != 3:
-            xyz = [0.82, -0.32, 0.0]
+            xyz = [-0.82, 0.30, 0.0]
         ps = PoseStamped()
         ps.header.frame_id = "base_link"
         ps.header.stamp = self.get_clock().now().to_msg()

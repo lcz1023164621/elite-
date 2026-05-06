@@ -13,9 +13,9 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 
 def _load_scene_defaults(share: Path) -> tuple[str, str, str]:
-    rect_center = [0.68, 0.16, 0.03]
-    rect_size = [0.14, 0.10, 0.06]
-    carton_pose = [0.82, -0.32, 0.0]
+    rect_center = [-0.82, 0.30, 0.046]
+    rect_size = [0.20, 0.14, 0.08]
+    carton_pose = [-0.82, 0.30, 0.0]
     cfg = share / "config" / "scene_objects.yaml"
     try:
         doc = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}

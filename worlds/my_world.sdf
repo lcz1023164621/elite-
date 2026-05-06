@@ -48,9 +48,9 @@
       </link>
     </model>
 
-    <!-- 待抓取矩形物体：前移到更舒适的工作带，给末端竖直对位留出缓冲 -->
+    <!-- 待抓取矩形物体：初始放在 carton_box 正中央，供 1 号机械臂从箱内抓取 -->
     <model name="rect_pickup">
-      <pose>0.56 0.0 0.04 0 0 0</pose>
+      <pose>-0.82 0.30 0.046 0 0 0</pose>
       <link name="box_link">
         <inertial>
           <pose>0 0 0 0 0 0</pose>
@@ -104,9 +104,9 @@
       </plugin>
     </model>
 
-    <!-- 透明纸箱：底面积 0.42*0.30=0.126m^2，可容纳至少三个 0.20*0.14m 物体 footprint；壁高 0.22m > 2*0.08m -->
+    <!-- 透明纸箱：关于 1 号机械臂基准轴镜像到另一侧，rect_pickup 初始位于箱体中央 -->
     <model name="carton_box">
-      <pose>0.82 -0.30 0 0 0 0</pose>
+      <pose>-0.82 0.30 0 0 0 0</pose>
       <static>true</static>
       <link name="base">
         <visual name="floor">

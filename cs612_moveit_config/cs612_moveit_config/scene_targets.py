@@ -26,10 +26,15 @@ def compute_targets(cfg: dict[str, Any]) -> dict[str, tuple[float, float, float]
     top_center = (cx, cy, top_z)
     approach = (cx, cy, top_z + clear)
     c = cfg["carton_box"]
-    px, py = c["center_xy"]
-    fz = float(c["floor_top_z"])
-    ph = float(c["place_height_above_floor"])
-    place = (float(px), float(py), fz + ph)
+    place_cfg = cfg.get("place_target") or {}
+    configured_place = place_cfg.get("tcp_xyz") or place_cfg.get("xyz")
+    if isinstance(configured_place, list) and len(configured_place) == 3:
+        place = (float(configured_place[0]), float(configured_place[1]), float(configured_place[2]))
+    else:
+        px, py = c["center_xy"]
+        fz = float(c["floor_top_z"])
+        ph = float(c["place_height_above_floor"])
+        place = (float(px), float(py), fz + ph)
     return {
         "top_center": top_center,
         "approach": approach,

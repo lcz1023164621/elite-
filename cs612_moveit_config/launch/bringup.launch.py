@@ -10,7 +10,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, SetEnvironmentVariable, TimerAction
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit, OnShutdown
+from launch.event_handlers import OnProcessExit, OnProcessStart, OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -27,6 +27,8 @@ _ARM_JOINTS = [
 ]
 _DEBUG_LOG_PATH = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-a97e6b.log")
 _DEBUG_SESSION_ID = "a97e6b"
+_DEBUG_LOG_PATH_ACTIVE = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-3e253c.log")
+_DEBUG_SESSION_ID_ACTIVE = "3e253c"
 _AGENT_9009e8_ID = "9009e8"
 # 与 auto_pick_place._IDE_CURSOR_MIRROR_LOG 一致：便于对照 launch 子进程与 Cursor 工作区是否同一挂载
 _IDE_CURSOR_AGENT_LOG = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-9009e8.log")
@@ -98,6 +100,19 @@ def _debug_log(location: str, message: str, hypothesis_id: str, data: dict) -> N
             pass
 
 
+def _debug_log_active(location: str, message: str, hypothesis_id: str, data: dict) -> None:
+    payload = {
+        "sessionId": _DEBUG_SESSION_ID_ACTIVE,
+        "runId": "pre-fix",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    _append_line(_DEBUG_LOG_PATH_ACTIVE, json.dumps(payload, ensure_ascii=True) + "\n")
+
+
 def _load_yaml(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
@@ -132,6 +147,8 @@ def _launch_setup(context, *args, **kwargs):
     launch_gz_gui = LaunchConfiguration("launch_gz_gui")
     rviz_config_arg = LaunchConfiguration("rviz_config")
     helper_modules = {
+        "cs612_joint_states_bridge": "cs612_moveit_config.joint_states_bridge",
+        "cs612_trajectory_action_bridge": "cs612_moveit_config.trajectory_action_bridge",
         "cs612_world_markers": "cs612_moveit_config.world_markers",
         "cs612_planning_scene_spawner": "cs612_moveit_config.planning_scene_spawner",
         "cs612_system_watchdog": "cs612_moveit_config.system_watchdog",
@@ -331,39 +348,6 @@ def _launch_setup(context, *args, **kwargs):
     )
     # #endregion
 
-    joint_state_broadcaster = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=[
-            "joint_state_broadcaster",
-            "--controller-manager",
-            "/controller_manager",
-            "--controller-manager-timeout",
-            "60",
-            "--service-call-timeout",
-            "20",
-            "--switch-timeout",
-            "20",
-        ],
-        output="screen",
-    )
-    joint_trajectory_controller = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=[
-            "joint_trajectory_controller",
-            "--controller-manager",
-            "/controller_manager",
-            "--controller-manager-timeout",
-            "60",
-            "--service-call-timeout",
-            "20",
-            "--switch-timeout",
-            "20",
-        ],
-        output="screen",
-    )
-
     gz_bridge = Node(
         package="ros_gz_bridge",
         executable="bridge_node",
@@ -379,6 +363,26 @@ def _launch_setup(context, *args, **kwargs):
         executable="parameter_bridge",
         arguments=[
             "/world/arm_world/set_pose@ros_gz_interfaces/srv/SetEntityPose",
+        ],
+        output="screen",
+    )
+    joint_state_broadcaster_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager",
+            "/controller_manager",
+        ],
+        output="screen",
+    )
+    joint_trajectory_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "joint_trajectory_controller",
+            "--controller-manager",
+            "/controller_manager",
         ],
         output="screen",
     )
@@ -430,12 +434,19 @@ def _launch_setup(context, *args, **kwargs):
     )
 
     _ap_ndjson = str((project_root / ".cursor" / "debug-9009e8.log").resolve())
+    source_pythonpath = str((project_root / "cs612_moveit_config").resolve())
+    inherited_pythonpath = os.environ.get("PYTHONPATH", "").strip()
+    if inherited_pythonpath:
+        source_pythonpath = f"{source_pythonpath}:{inherited_pythonpath}"
 
     def package_script(name: str, *ros_args: str) -> ExecuteProcess:
-        add_env: dict[str, str] | None = None
+        add_env: dict[str, str] = {
+            # 优先从工作区源码导入，避免 install/ 中遗留的 conda Python 版本 site-packages 污染。
+            "PYTHONPATH": source_pythonpath,
+        }
         if name == "cs612_auto_pick_place":
             # 强制子进程继承 NDJSON 绝对路径（H_exec：部分环境下 ExecuteProcess 未合并上层 env）
-            add_env = {"CS612_DEBUG_NDJSON_PATH": _ap_ndjson}
+            add_env["CS612_DEBUG_NDJSON_PATH"] = _ap_ndjson
         return ExecuteProcess(
             cmd=[
                 "/usr/bin/python3",
@@ -496,6 +507,12 @@ def _launch_setup(context, *args, **kwargs):
             "helpers_count": len(helpers),
             "detach_action_count": len(startup_detach_actions),
             "arm_joint_count": len(_ARM_JOINTS),
+            "main_joint_state_bridge": False,
+            "main_trajectory_bridge": False,
+            "ros2_control_spawners": [
+                "joint_state_broadcaster",
+                "joint_trajectory_controller",
+            ],
         },
     )
     # #endregion
@@ -505,15 +522,29 @@ def _launch_setup(context, *args, **kwargs):
     except (ValueError, TypeError):
         ap_delay = 25.0
     ap_delay = max(0.0, min(float(ap_delay), 600.0))
+    # #region agent log
+    _debug_log_active(
+        "bringup.launch.py:_launch_setup",
+        "auto_pick_timer_config",
+        "H1",
+        {
+            "auto_pick": auto_pick.perform(context),
+            "auto_pick_delay_sec": ap_delay,
+            "auto_pick_module": helper_modules["cs612_auto_pick_place"],
+        },
+    )
+    # #endregion
 
     return [
         gz_launch,
         robot_state_publisher,
         TimerAction(period=2.0, actions=[spawn_robot]),
-        TimerAction(period=4.0, actions=[joint_state_broadcaster, joint_trajectory_controller, gz_bridge, gz_set_pose_bridge]),
+        TimerAction(period=4.0, actions=[gz_bridge, gz_set_pose_bridge]),
         TimerAction(
             period=5.0,
             actions=[
+                joint_state_broadcaster_spawner,
+                joint_trajectory_controller_spawner,
                 move_group,
                 *helpers,
                 rviz,
@@ -524,6 +555,26 @@ def _launch_setup(context, *args, **kwargs):
             ],
         ),
         TimerAction(period=ap_delay, actions=[auto_pick_node], condition=IfCondition(auto_pick)),
+        RegisterEventHandler(
+            OnProcessStart(
+                target_action=auto_pick_node,
+                on_start=[
+                    OpaqueFunction(
+                        function=lambda context: (
+                            # #region agent log
+                            _debug_log_active(
+                                "bringup.launch.py:OnProcessStart(cs612_auto_pick_place)",
+                                "process_start",
+                                "H2",
+                                {"process": "cs612_auto_pick_place"},
+                            ),
+                            # #endregion
+                            []
+                        )[1]
+                    )
+                ],
+            )
+        ),
         RegisterEventHandler(
             OnProcessExit(
                 target_action=move_group,
@@ -649,6 +700,7 @@ def _launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     project_root = _find_project_root()
+    moveit_config_dir = Path(get_package_share_directory("cs612_moveit_config"))
     runtime_root = Path("/tmp/cs612_runtime")
     runtime_home = runtime_root / "home"
     runtime_xdg_config = runtime_root / "xdg_config"
@@ -657,6 +709,7 @@ def generate_launch_description():
     for path in (runtime_home, runtime_xdg_config, runtime_xdg_cache, runtime_ros_logs):
         path.mkdir(parents=True, exist_ok=True)
     resource_paths = [
+        moveit_config_dir / "models",
         project_root / "models",
         project_root / "models" / "gazebo_models",
         project_root / "worlds",

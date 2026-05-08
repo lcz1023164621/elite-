@@ -49,7 +49,7 @@ from ros_gz_interfaces.msg import Entity
 from ros_gz_interfaces.srv import SetEntityPose
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
-from std_msgs.msg import Bool, Empty, String
+from std_msgs.msg import Bool, Empty, Float64, String
 from tf2_msgs.msg import TFMessage
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -67,6 +67,9 @@ _ARM_JOINTS = [
 _AGENT_SESSION_ID = "9009e8"
 _debug_ndjson_headers_sent: set[str] = set()
 _debug_ndjson_ros_pub: object | None = None
+_DEBUG_SESSION_ID_ACTIVE = "3e253c"
+_DEBUG_LOG_PATH_ACTIVE = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-3e253c.log")
+_DEBUG_INGEST_URL_ACTIVE = "http://127.0.0.1:7766/ingest/26484488-645d-437d-a921-8a4f664599f7"
 # 与 bringup 中 debug-cfd510.log 相同约定：保证 Cursor 打开的本仓库路径始终有一份 NDJSON（即使 CS612_PROJECT_ROOT 指向其它副本）。
 _IDE_CURSOR_MIRROR_LOG = Path("/mnt/e/gazebo_projects/my_first_world/.cursor/debug-9009e8.log")
 _debug_ndjson_fs_warned: bool = False
@@ -75,6 +78,44 @@ _debug_ndjson_fs_warned: bool = False
 def _register_debug_ndjson_publisher(pub: object | None) -> None:
     global _debug_ndjson_ros_pub
     _debug_ndjson_ros_pub = pub
+
+
+def _agent_debug_log_active(
+    location: str, message: str, hypothesis_id: str, data: dict, run_id: str = "pre-fix"
+) -> None:
+    # #region agent log
+    payload = {
+        "sessionId": _DEBUG_SESSION_ID_ACTIVE,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    line = json.dumps(payload, ensure_ascii=True)
+    try:
+        _DEBUG_LOG_PATH_ACTIVE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_DEBUG_LOG_PATH_ACTIVE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            _DEBUG_INGEST_URL_ACTIVE,
+            data=line.encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Debug-Session-Id": _DEBUG_SESSION_ID_ACTIVE,
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=0.35)
+    except Exception:
+        pass
+    # #endregion
 
 
 def _env_cs612_project_root_cursor_log() -> Path | None:
@@ -802,10 +843,9 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("rect_fallback_wait_sec", 8.0)
         self.declare_parameter("carton_fallback_pose_xyz", carton_fb_xyz)
         self.declare_parameter("carton_fallback_wait_sec", 8.0)
-        # 底面吸附判据：只要求落在物体上表面的有效吸附区域内，不强制必须是几何中心点。
-        # 当前吸盘半径约 42 mm，因此横向容差放到 45 mm，允许顶面内“偏心吸附”。
-        self.declare_parameter("suction_attach_lateral_tol", 0.080)
-        self.declare_parameter("suction_touch_lateral_tol", 0.080)
+        # 抓取要求尽量靠近顶面中心，避免“可吸附但偏心”导致后续搬运姿态不稳。
+        self.declare_parameter("suction_attach_lateral_tol", 0.025)
+        self.declare_parameter("suction_touch_lateral_tol", 0.025)
         self.declare_parameter("suction_attach_vertical_tol", 0.30)
         self.declare_parameter("suction_attach_axis_down_min", 0.90)
 
@@ -851,6 +891,27 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("place_point_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter("use_configured_place_target", True)
         self.declare_parameter("configured_place_target_xyz", place_target_xyz)
+        self.declare_parameter("conveyor_place_use_start_inset", True)
+        self.declare_parameter("conveyor_place_inset_margin_m", 0.04)
+        self.declare_parameter("conveyor_place_lateral_offset_m", 0.0)
+        self.declare_parameter("conveyor_place_align_yaw", False)
+        self.declare_parameter("place_dense_descent_enabled", True)
+        self.declare_parameter("place_dense_waypoint_step_m", 0.040)
+        self.declare_parameter("place_dense_orientation_weight", 5.0)
+        self.declare_parameter("place_dense_settle_sec", 0.0)
+        self.declare_parameter("conveyor_transport_enabled", True)
+        self.declare_parameter("conveyor_transport_speed_mps", 0.18)
+        self.declare_parameter("conveyor_transport_step_m", 0.050)
+        self.declare_parameter("conveyor_transport_end_margin_m", 0.01)
+        self.declare_parameter("conveyor_transport_settle_sec", 0.40)
+        self.declare_parameter("conveyor_transport_goal_tol_m", 0.05)
+        self.declare_parameter("conveyor_transport_lateral_tol_m", 0.12)
+        self.declare_parameter("conveyor_transport_direction_sign", 1.0)
+        self.declare_parameter("conveyor_transport_timeout_pad_sec", 30.0)
+        self.declare_parameter("conveyor_transport_monitor_period_sec", 0.10)
+        self.declare_parameter("conveyor_track_command_topic", "/middle_conveyor/track_cmd_vel")
+        self.declare_parameter("conveyor_roller_command_topic", "/middle_conveyor/roller_cmd_vel")
+        self.declare_parameter("conveyor_roller_radius_m", 0.03)
         self.declare_parameter("cartesian_step_max_m", 0.008)
         self.declare_parameter("cartesian_step_max_rad", 0.12)
         self.declare_parameter("cartesian_cmd_period_sec", 0.050)
@@ -902,7 +963,7 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("pre_attach_settle_sec", 0.6)
         self.declare_parameter("dense_waypoint_descent_enabled", True)
         self.declare_parameter("dense_waypoint_step_m", 0.012)
-        self.declare_parameter("dense_waypoint_xy_correction_gain", 0.85)
+        self.declare_parameter("dense_waypoint_xy_correction_gain", 0.65)
         self.declare_parameter("dense_waypoint_xy_correction_max_m", 0.015)
         self.declare_parameter("dense_waypoint_orientation_weight", 3.0)
         self.declare_parameter("dense_waypoint_settle_sec", 0.01)
@@ -922,9 +983,20 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("pick_pose_guard_joint5_max", 2.30)
         self.declare_parameter("pick_pose_guard_joint4_abs_max", 2.95)
         self.declare_parameter("pick_pose_guard_joint6_abs_max", 2.95)
+        self.declare_parameter("place_pose_guard_enabled", True)
+        self.declare_parameter("place_pose_guard_joint2_min", -2.40)
+        self.declare_parameter("place_pose_guard_joint2_max", 0.20)
+        self.declare_parameter("place_pose_guard_joint3_min", -0.20)
+        self.declare_parameter("place_pose_guard_joint3_max", 2.60)
+        self.declare_parameter("place_pose_guard_joint5_min", 0.75)
+        self.declare_parameter("place_pose_guard_joint5_max", 2.50)
+        self.declare_parameter("place_pose_guard_joint4_abs_max", 2.60)
+        self.declare_parameter("place_pose_guard_joint6_abs_max", 2.60)
+        self.declare_parameter("place_verify_lateral_tol_m", 0.020)
+        self.declare_parameter("approach_verify_lateral_tol_m", 0.045)
         self.declare_parameter("approach_verify_max_correction_step_m", 0.06)
         self.declare_parameter("approach_verify_reject_large_error_m", 0.30)
-        self.declare_parameter("approach_verify_relaxed_lateral_tol_m", 0.050)
+        self.declare_parameter("approach_verify_relaxed_lateral_tol_m", 0.045)
         self.declare_parameter("adaptive_touch_target_enabled", True)
         self.declare_parameter("adaptive_touch_max_adjust_m", 0.03)
         self.declare_parameter("arm_collision_check_enabled", True)
@@ -981,6 +1053,16 @@ class AutoPickPlaceNode(Node):
         self._pub_detach = self.create_publisher(Empty, "/cs612/suction/detach", 10)
         self._pub_visual_attached = self.create_publisher(Bool, "/cs612/suction/attached_visual_state", 10)
         self._pub_assumed_state = self.create_publisher(Bool, "/cs612/suction/assumed_state", 10)
+        self._pub_conveyor_track = self.create_publisher(
+            Float64,
+            str(self.get_parameter("conveyor_track_command_topic").value),
+            10,
+        )
+        self._pub_conveyor_roller = self.create_publisher(
+            Float64,
+            str(self.get_parameter("conveyor_roller_command_topic").value),
+            10,
+        )
         if os.environ.get("CS612_DEBUG_PUBLISH_ROS", "").strip():
             _register_debug_ndjson_publisher(
                 self.create_publisher(String, "/cs612/debug_ndjson_line", 10)
@@ -1619,6 +1701,47 @@ class AutoPickPlaceNode(Node):
             self.get_logger().info(f"{label}: 当前已在目标高度，无需下压")
             return True
 
+        # 下压前先在当前高度把 TCP/吸盘底面回收到目标中心线上，
+        # 避免从“可达但偏心”的 hover 姿态直接下压，把物体横向推走。
+        pre_center_gate = max(
+            0.015,
+            min(
+                max_xy_drift_m,
+                float(self.get_parameter("approach_verify_lateral_tol_m").value),
+            ),
+        )
+        cup_pose0 = self._lookup_link_pose_in_base("suction_cup_link")
+        if cup_pose0 is not None:
+            cup_bottom0 = self._point_with_local_offset(
+                cup_pose0.position,
+                cup_pose0.orientation,
+                0.0,
+                0.0,
+                suction_contact_offset,
+            )
+            lateral0 = math.hypot(float(cup_bottom0.x) - float(top.x), float(cup_bottom0.y) - float(top.y))
+            if lateral0 > pre_center_gate:
+                centerline_wp = Point(x=float(target.x), y=float(target.y), z=float(start_p.z))
+                self.get_logger().warn(
+                    f"{label}: 下压前横向偏差 {lateral0:.4f}m > {pre_center_gate:.4f}m，"
+                    "先执行同高度中心线回正"
+                )
+                if not self._move_cartesian_direct(
+                    centerline_wp,
+                    orientation,
+                    mode=mode,
+                    label=f"{label}_centerline_reset",
+                    orientation_weight_override=max(orientation_correction_weight, 4.0),
+                ):
+                    self.get_logger().error(f"{label}: 中心线回正失败，终止下压")
+                    return False
+                time.sleep(max(0.05, settle_sec_per_waypoint))
+                pose = self._current_tcp_pose()
+                if pose is None:
+                    self.get_logger().error(f"{label}: 中心线回正后无法读取 TCP 位姿")
+                    return False
+                start_p, start_q = pose
+
         n_steps = max(1, int(math.ceil(abs(total_dz) / max(0.001, waypoint_step_m))))
         dz_per_step = total_dz / n_steps
 
@@ -1768,6 +1891,95 @@ class AutoPickPlaceNode(Node):
                 f"lateral={final_lateral:.4f}m down_cos={-down_ax[2]:.4f}"
             )
 
+        return True
+
+    def _move_cartesian_vertical_waypoints(
+        self,
+        target: Point,
+        orientation: Quaternion,
+        rect_half: Sequence[float],
+        mode: str = "place",
+        label: str = "vertical_waypoints",
+        waypoint_step_m: float = 0.010,
+        orientation_weight: float = 5.0,
+        settle_sec_per_waypoint: float = 0.03,
+    ) -> bool:
+        """用当前 IK 分支沿固定 XY/姿态做垂直运动，避免触碰阶段一路横摆修正。"""
+        cur_joints = self._current_arm_positions()
+        if cur_joints is None:
+            self.get_logger().error(f"{label}: 无法读取当前关节状态")
+            return False
+        pose = self._current_tcp_pose()
+        if pose is None:
+            self.get_logger().error(f"{label}: 无法读取当前 TCP 位姿")
+            return False
+
+        start_p, _ = pose
+        total_dz = float(target.z) - float(start_p.z)
+        if abs(total_dz) < 1e-5:
+            self.get_logger().info(f"{label}: 当前已在目标高度，无需下压")
+            return True
+        n_steps = max(1, int(math.ceil(abs(total_dz) / max(0.001, waypoint_step_m))))
+        dz_per_step = total_dz / n_steps
+        q_seed = [self._joint_limit_clamp(i, float(v)) for i, v in enumerate(cur_joints)]
+        command_seed = list(cur_joints)
+        waypoint_lead_sec = max(0.04, float(self.get_parameter("dense_waypoint_point_time_sec").value))
+        cartesian_dt = max(0.01, float(self.get_parameter("cartesian_cmd_period_sec").value))
+        cur_z = float(start_p.z)
+
+        self.get_logger().info(
+            f"{label}: 固定XY垂直运动 start=({float(start_p.x):.4f},{float(start_p.y):.4f},{float(start_p.z):.4f}) "
+            f"target=({float(target.x):.4f},{float(target.y):.4f},{float(target.z):.4f}) "
+            f"steps={n_steps} dz_per_step={dz_per_step:.4f}m"
+        )
+
+        for step in range(1, n_steps + 1):
+            next_z = cur_z + dz_per_step
+            if dz_per_step < 0:
+                next_z = max(next_z, float(target.z))
+            else:
+                next_z = min(next_z, float(target.z))
+            wp = Point(x=float(target.x), y=float(target.y), z=next_z)
+            self.get_logger().info(
+                f"{label}[{step}/{n_steps}]: wp=({wp.x:.4f},{wp.y:.4f},{wp.z:.4f})"
+            )
+            sol = self._solve_cartesian_ik_direct(
+                wp,
+                orientation,
+                q_seed,
+                mode=mode,
+                label=f"{label}_ik[{step}]",
+                orientation_weight_override=orientation_weight,
+            )
+            if sol is None:
+                self.get_logger().error(f"{label}: IK 失败 step={step}/{n_steps}")
+                return False
+            cmd = self._match_joint_positions_to_reference(sol, command_seed)
+            self._publish_joint_vector(cmd, lead_sec_override=waypoint_lead_sec)
+            q_seed = sol
+            command_seed = cmd
+            time.sleep(max(cartesian_dt, waypoint_lead_sec))
+            if self._fake_attach_active:
+                self._snap_fake_attach_pose(rect_half, f"{label}_snap[{step}]", attempts=1)
+            if settle_sec_per_waypoint > 0:
+                time.sleep(settle_sec_per_waypoint)
+            cur_z = next_z
+
+        if not self._wait_joint_goal(command_seed, label):
+            self.get_logger().warn(f"{label}: 最终关节未完全收敛")
+        final_pose = self._current_tcp_pose()
+        if final_pose is not None:
+            p, q = final_pose
+            pos_err = math.sqrt(
+                (float(p.x) - float(target.x)) ** 2
+                + (float(p.y) - float(target.y)) ** 2
+                + (float(p.z) - float(target.z)) ** 2
+            )
+            down_axis = _quat_rotate_vec(q, 0.0, 0.0, 1.0)
+            self.get_logger().info(
+                f"{label} 完成: pos_err={pos_err:.4f}m down_cos={-down_axis[2]:.4f}"
+            )
+            return pos_err <= max(0.025, float(self.get_parameter("cartesian_ik_pos_tol_m").value) * 6.0)
         return True
 
     def _estimate_pick_offset_xy(self, rect_half: Sequence[float]) -> tuple[float, float] | None:
@@ -1948,6 +2160,236 @@ class AutoPickPlaceNode(Node):
         except Exception as e:
             self.get_logger().warn(f"放置点箱内夹紧失败，将使用原值: {e}")
         return out
+
+    def _conveyor_start_place_target(
+        self, fallback: Point, rect_half: Sequence[float]
+    ) -> tuple[Point, float | None]:
+        """把配置中的传送带起点边缘换算成物体中心放置点。"""
+        try:
+            from ament_index_python.packages import get_package_share_directory
+
+            cfg_path = Path(get_package_share_directory("cs612_moveit_config")) / "config" / "scene_objects.yaml"
+            doc = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            conv = doc.get("middle_conveyor") or {}
+            pose = conv.get("model_pose_xyz") or [fallback.x, fallback.y, 0.0]
+            rpy = conv.get("model_pose_rpy") or [0.0, 0.0, 0.0]
+            size = conv.get("size_xyz") or [1.50, 0.30, 0.20]
+            start = conv.get("start_xyz")
+            yaw = float(rpy[2])
+            dx = math.cos(yaw)
+            dy = math.sin(yaw)
+            if isinstance(start, list) and len(start) == 3:
+                edge_x = float(start[0])
+                edge_y = float(start[1])
+                surface_z = float(start[2])
+            else:
+                half_len = 0.5 * float(size[0])
+                edge_x = float(pose[0]) - dx * half_len
+                edge_y = float(pose[1]) - dy * half_len
+                surface_z = float(conv.get("top_surface_z", float(pose[2]) + float(size[2])))
+
+            if not self._param_bool("conveyor_place_use_start_inset"):
+                return Point(x=edge_x, y=edge_y, z=surface_z), yaw
+
+            margin = max(0.0, float(self.get_parameter("conveyor_place_inset_margin_m").value))
+            lateral = float(self.get_parameter("conveyor_place_lateral_offset_m").value)
+            half_along = max(0.0, float(rect_half[0]) if len(rect_half) > 0 else 0.10)
+            inset = half_along + margin
+            cx = edge_x + dx * inset - dy * lateral
+            cy = edge_y + dy * inset + dx * lateral
+            out = Point(x=cx, y=cy, z=surface_z)
+            self.get_logger().info(
+                "传送带起点放置目标已按物体尺寸内移: "
+                f"edge=({edge_x:.3f},{edge_y:.3f},{surface_z:.3f}), "
+                f"yaw={yaw:.3f}, inset={inset:.3f}, lateral={lateral:.3f} -> "
+                f"center=({out.x:.3f},{out.y:.3f},{out.z:.3f})"
+            )
+            return out, yaw
+        except Exception as e:
+            self.get_logger().warn(f"传送带放置点自动换算失败，使用配置点: {e}")
+            return fallback, None
+
+    def _conveyor_transport_end_pose(
+        self, release_pose: Pose, rect_half: Sequence[float]
+    ) -> Pose | None:
+        """根据传送带尺寸计算物体中心在另一端的目标位姿。"""
+        try:
+            from ament_index_python.packages import get_package_share_directory
+
+            cfg_path = Path(get_package_share_directory("cs612_moveit_config")) / "config" / "scene_objects.yaml"
+            doc = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            conv = doc.get("middle_conveyor") or {}
+            pose = conv.get("model_pose_xyz") or [1.00825, -0.35547, 0.0]
+            rpy = conv.get("model_pose_rpy") or [0.0, 0.0, 0.0]
+            size = conv.get("size_xyz") or [1.50, 0.30, 0.20]
+            surface_z = float(conv.get("top_surface_z", float(pose[2]) + float(size[2])))
+            yaw = float(rpy[2])
+            half_len = 0.5 * float(size[0])
+            dx = math.cos(yaw)
+            dy = math.sin(yaw)
+            half_along = max(0.0, float(rect_half[0]) if len(rect_half) > 0 else 0.10)
+            end_margin = max(0.0, float(self.get_parameter("conveyor_transport_end_margin_m").value))
+            inset = half_along + end_margin
+            end_edge_x = float(pose[0]) + dx * half_len
+            end_edge_y = float(pose[1]) + dy * half_len
+
+            out = Pose()
+            out.position.x = end_edge_x - dx * inset
+            out.position.y = end_edge_y - dy * inset
+            out.position.z = max(surface_z + max(0.001, float(rect_half[2])), float(release_pose.position.z))
+            out.orientation = _quat_from_rpy(0.0, 0.0, yaw)
+            return out
+        except Exception as e:
+            self.get_logger().warn(f"传送带终点位姿计算失败，跳过输送: {e}")
+            return None
+
+    def _publish_conveyor_velocity(self, linear_speed_mps: float) -> None:
+        sign = float(self.get_parameter("conveyor_transport_direction_sign").value)
+        track_msg = Float64()
+        track_msg.data = float(linear_speed_mps * sign)
+        roller_msg = Float64()
+        # IFRA 替换后以 track 话题直接驱动皮带线速度；roller 话题保留兼容并复用同一线速度。
+        roller_msg.data = float(track_msg.data)
+        self._pub_conveyor_track.publish(track_msg)
+        self._pub_conveyor_roller.publish(roller_msg)
+        # #region agent log
+        _agent_debug_log_active(
+            "auto_pick_place.py:_publish_conveyor_velocity",
+            "conveyor velocity published",
+            "H3",
+            {
+                "linear_speed_mps": float(linear_speed_mps),
+                "track_cmd": float(track_msg.data),
+                "roller_cmd": float(roller_msg.data),
+                "track_subscribers": int(self._pub_conveyor_track.get_subscription_count()),
+                "roller_subscribers": int(self._pub_conveyor_roller.get_subscription_count()),
+            },
+        )
+        # #endregion
+
+    def _run_conveyor_transport(
+        self,
+        release_pose: Pose,
+        rect_half: Sequence[float],
+        label: str = "conveyor_transport",
+    ) -> bool:
+        """启动真实传送带驱动，等待物体靠接触摩擦移动到另一端。"""
+        if not self._param_bool("conveyor_transport_enabled"):
+            self.get_logger().info(f"{label}: conveyor_transport_enabled=false，跳过输送")
+            return True
+
+        target_pose = self._conveyor_transport_end_pose(release_pose, rect_half)
+        if target_pose is None:
+            return False
+
+        current_pose = Pose()
+        current_pose.position.x = float(release_pose.position.x)
+        current_pose.position.y = float(release_pose.position.y)
+        current_pose.position.z = float(release_pose.position.z)
+        current_pose.orientation = release_pose.orientation
+        if self._rect is not None:
+            current_pose = self._rect.pose
+
+        start_xy = np.array([float(current_pose.position.x), float(current_pose.position.y)], dtype=float)
+        end_xy = np.array([float(target_pose.position.x), float(target_pose.position.y)], dtype=float)
+        travel = float(np.linalg.norm(end_xy - start_xy))
+        if travel < 1e-4:
+            self.get_logger().info(f"{label}: 物体已在传送带终点附近，无需输送")
+            self._apply_released_rect_collision_scene(target_pose, rect_half)
+            return True
+
+        speed_mps = max(0.01, float(self.get_parameter("conveyor_transport_speed_mps").value))
+        goal_tol = max(0.01, float(self.get_parameter("conveyor_transport_goal_tol_m").value))
+        lateral_tol = max(0.03, float(self.get_parameter("conveyor_transport_lateral_tol_m").value))
+        settle_sec = max(0.0, float(self.get_parameter("conveyor_transport_settle_sec").value))
+        pad_sec = max(1.0, float(self.get_parameter("conveyor_transport_timeout_pad_sec").value))
+        monitor_sec = max(0.05, float(self.get_parameter("conveyor_transport_monitor_period_sec").value))
+        deadline = time.time() + travel / speed_mps + pad_sec
+        direction = (end_xy - start_xy) / max(travel, 1e-6)
+        start_dot = float(np.dot(start_xy, direction))
+        target_dot = float(np.dot(end_xy, direction))
+        reached = False
+        last_progress_log = 0.0
+
+        self.get_logger().info(
+            f"{label}: start=({current_pose.position.x:.3f},{current_pose.position.y:.3f},{current_pose.position.z:.3f}) "
+            f"-> end=({target_pose.position.x:.3f},{target_pose.position.y:.3f},{target_pose.position.z:.3f}), "
+            f"travel={travel:.3f}m speed={speed_mps:.3f}m/s"
+        )
+        # #region agent log
+        _agent_debug_log_active(
+            "auto_pick_place.py:_run_conveyor_transport:start",
+            "transport stage entered",
+            "H4",
+            {
+                "travel_m": float(travel),
+                "start_xy": [float(start_xy[0]), float(start_xy[1])],
+                "end_xy": [float(end_xy[0]), float(end_xy[1])],
+                "speed_mps": float(speed_mps),
+            },
+        )
+        # #endregion
+        self._rect_pose_can_move = True
+        self._publish_conveyor_velocity(speed_mps)
+        try:
+            while time.time() < deadline:
+                self._publish_conveyor_velocity(speed_mps)
+                rect_pose = self._rect.pose if self._rect is not None else current_pose
+                rect_xy = np.array(
+                    [float(rect_pose.position.x), float(rect_pose.position.y)],
+                    dtype=float,
+                )
+                along = float(np.dot(rect_xy, direction))
+                progress = max(0.0, min(travel, along - start_dot))
+                lateral_err = float(
+                    abs(direction[0] * (rect_xy[1] - end_xy[1]) - direction[1] * (rect_xy[0] - end_xy[0]))
+                )
+                dist_to_goal = float(np.linalg.norm(rect_xy - end_xy))
+                if time.time() - last_progress_log >= 1.0:
+                    last_progress_log = time.time()
+                    self.get_logger().info(
+                        f"{label}: progress={progress:.3f}/{travel:.3f}m "
+                        f"dist={dist_to_goal:.3f}m lateral={lateral_err:.3f}m"
+                    )
+                    # #region agent log
+                    _agent_debug_log_active(
+                        "auto_pick_place.py:_run_conveyor_transport:loop",
+                        "transport progress",
+                        "H4",
+                        {
+                            "progress_m": float(progress),
+                            "travel_m": float(travel),
+                            "dist_to_goal_m": float(dist_to_goal),
+                            "lateral_err_m": float(lateral_err),
+                        },
+                    )
+                    # #endregion
+                if along >= (target_dot - goal_tol) and lateral_err <= lateral_tol:
+                    reached = True
+                    break
+                time.sleep(monitor_sec)
+        finally:
+            self._publish_conveyor_velocity(0.0)
+            time.sleep(0.05)
+            self._publish_conveyor_velocity(0.0)
+
+        if settle_sec > 0.0:
+            time.sleep(settle_sec)
+
+        final_pose = self._rect.pose if self._rect is not None else target_pose
+        self._apply_released_rect_collision_scene(final_pose, rect_half)
+        if not reached:
+            self.get_logger().error(
+                f"{label}: 物体未在超时前到达传送带末端，"
+                f"last=({final_pose.position.x:.3f},{final_pose.position.y:.3f},{final_pose.position.z:.3f})"
+            )
+            return False
+
+        self.get_logger().info(
+            f"{label}: 已将 rect_pickup 输送到传送带另一端 "
+            f"({final_pose.position.x:.3f}, {final_pose.position.y:.3f}, {final_pose.position.z:.3f})"
+        )
+        return True
 
     def _place_retreat_point(
         self, place_pt: Point, carton_ps: PoseStamped | None, post_place_retreat: float
@@ -2446,7 +2888,8 @@ class AutoPickPlaceNode(Node):
         pose = Pose()
         pose.position.x = contact.x
         pose.position.y = contact.y
-        pose.position.z = max(half_z, contact.z - half_z + touch_dz)
+        # 释放到支撑面时不再额外抬高 touch_dz，避免 detach 后出现“先悬空再落下”。
+        pose.position.z = max(half_z, contact.z - half_z)
         pose.orientation = _flat_yaw_quat_from_tool_orientation(place_orientation)
         return pose
 
@@ -2458,6 +2901,9 @@ class AutoPickPlaceNode(Node):
         label: str = "place_release_planned",
     ) -> bool:
         final_pose = self._planned_rect_pose_at_place(place_tcp, place_orientation, half_sizes)
+        # 先在仍然吸附时把物体贴到最终支撑位，detach 时视觉和物理都更平稳。
+        self._set_rect_pose(final_pose, wait_sec=0.25, log_timeout=False)
+        time.sleep(0.12)
         self._suction_attached = None
         self._stop_fake_attach(label)
         self._pub_detach.publish(Empty())
@@ -3019,7 +3465,7 @@ class AutoPickPlaceNode(Node):
         不阻塞下压——笛卡尔触碰阶段会做最终 Z 贴合。"""
         suction_contact_offset = float(self.get_parameter("suction_contact_offset_z").value)
         max_verify_iters = 3
-        lateral_max = max(0.005, float(self.get_parameter("suction_touch_lateral_tol").value) * 1.5)
+        lateral_max = max(0.010, float(self.get_parameter("approach_verify_lateral_tol_m").value))
         min_cos = max(0.90, float(self.get_parameter("orientation_min_cos_before_touch").value))
         target_orient = orientations[0] if orientations else _suction_down_quat(0.0)
         max_fix_step = max(0.01, float(self.get_parameter("approach_verify_max_correction_step_m").value))
@@ -3075,12 +3521,6 @@ class AutoPickPlaceNode(Node):
                     f"z_err={z_err:.4f}m 由下压阶段修正）"
                 )
                 return True
-            # 宽松 XY + 朝向 OK 也放行
-            if lateral_err <= relaxed_lateral_tol and orient_ok:
-                self.get_logger().info(
-                    f"{label}[{attempt}]: 采用宽松判据通过（lateral={lateral_err:.4f} <= {relaxed_lateral_tol:.4f}）"
-                )
-                return True
 
             self.get_logger().warn(
                 f"{label}[{attempt}]: approach 未通过 "
@@ -3128,8 +3568,45 @@ class AutoPickPlaceNode(Node):
                 cup_pose.position, cup_pose.orientation, 0.0, 0.0, suction_contact_offset
             )
             final_lateral = math.hypot(cup_bottom_final.x - top.x, cup_bottom_final.y - top.y)
-            self.get_logger().warn(f"{label}: 验证结束 lateral={final_lateral:.4f}m, xy={'OK' if final_lateral <= lateral_max else 'FAIL'}")
-        return final_lateral <= lateral_max * 1.5 if cup_pose is not None else False
+            self.get_logger().warn(
+                f"{label}: 验证结束 lateral={final_lateral:.4f}m, "
+                f"strict_xy={'OK' if final_lateral <= lateral_max else 'FAIL'}, "
+                f"relaxed_xy={'OK' if final_lateral <= relaxed_lateral_tol else 'FAIL'}"
+            )
+        return final_lateral <= lateral_max if cup_pose is not None else False
+
+    def _verify_place_hover_pose(
+        self,
+        hover_target: Point,
+        label: str,
+    ) -> bool:
+        suction_contact_offset = float(self.get_parameter("suction_contact_offset_z").value)
+        lateral_max = max(0.010, float(self.get_parameter("place_verify_lateral_tol_m").value))
+        min_cos = max(0.95, float(self.get_parameter("orientation_min_cos_before_touch").value))
+        cup_pose = self._lookup_link_pose_in_base("suction_cup_link")
+        if cup_pose is None:
+            self.get_logger().warn(f"{label}: 无法读取 suction_cup_link TF，跳过放置 hover 验证")
+            return True
+        cup_bottom = self._point_with_local_offset(
+            cup_pose.position, cup_pose.orientation, 0.0, 0.0, suction_contact_offset
+        )
+        dx = cup_bottom.x - hover_target.x
+        dy = cup_bottom.y - hover_target.y
+        lateral_err = math.hypot(dx, dy)
+        down_axis = _quat_rotate_vec(cup_pose.orientation, 0.0, 0.0, 1.0)
+        down_cos = -down_axis[2]
+        self.get_logger().info(
+            f"{label}: lateral={lateral_err:.4f}m(max={lateral_max:.4f}), "
+            f"down_cos={down_cos:.4f}(min={min_cos:.4f})"
+        )
+        ok = lateral_err <= lateral_max and down_cos >= min_cos and self._place_pose_guard_ok(label)
+        if not ok:
+            self.get_logger().warn(
+                f"{label}: 放置 hover 未通过，"
+                f"xy={'OK' if lateral_err <= lateral_max else 'FAIL'} "
+                f"orient={'OK' if down_cos >= min_cos else 'FAIL'}"
+            )
+        return ok
 
     def _refine_xy_alignment(
         self,
@@ -3799,6 +4276,51 @@ class AutoPickPlaceNode(Node):
         guarded_tokens = ("pre_pick", "approach", "pick_", "touch", "realign")
         return any(token in label for token in guarded_tokens)
 
+    def _place_pose_guard_active(self, label: str) -> bool:
+        if not self._param_bool("place_pose_guard_enabled"):
+            return False
+        guarded_tokens = ("place_", "retreat", "transfer")
+        return any(token in label for token in guarded_tokens)
+
+    def _place_pose_guard_ok(self, label: str) -> bool:
+        if not self._place_pose_guard_active(label):
+            return True
+        joints = self._current_arm_positions()
+        if joints is None or len(joints) != 6:
+            return True
+        j2, j3, j4, j5, j6 = (
+            _wrap_to_pi(float(joints[1])),
+            _wrap_to_pi(float(joints[2])),
+            _wrap_to_pi(float(joints[3])),
+            _wrap_to_pi(float(joints[4])),
+            _wrap_to_pi(float(joints[5])),
+        )
+        j2_min = float(self.get_parameter("place_pose_guard_joint2_min").value)
+        j2_max = float(self.get_parameter("place_pose_guard_joint2_max").value)
+        j3_min = float(self.get_parameter("place_pose_guard_joint3_min").value)
+        j3_max = float(self.get_parameter("place_pose_guard_joint3_max").value)
+        j5_min = float(self.get_parameter("place_pose_guard_joint5_min").value)
+        j5_max = float(self.get_parameter("place_pose_guard_joint5_max").value)
+        j4_abs_max = float(self.get_parameter("place_pose_guard_joint4_abs_max").value)
+        j6_abs_max = float(self.get_parameter("place_pose_guard_joint6_abs_max").value)
+        ok = (
+            j2_min <= j2 <= j2_max
+            and j3_min <= j3 <= j3_max
+            and j5_min <= j5 <= j5_max
+            and abs(j4) <= j4_abs_max
+            and abs(j6) <= j6_abs_max
+        )
+        if not ok:
+            self.get_logger().warn(
+                "放置姿态护栏触发: "
+                f"j2={j2:.3f}[{j2_min:.2f},{j2_max:.2f}], "
+                f"j3={j3:.3f}[{j3_min:.2f},{j3_max:.2f}], "
+                f"j4={j4:.3f}|<= {j4_abs_max:.2f}, "
+                f"j5={j5:.3f}[{j5_min:.2f},{j5_max:.2f}], "
+                f"j6={j6:.3f}|<= {j6_abs_max:.2f}"
+            )
+        return ok
+
     def _move_target_with_fallback(
         self,
         target: Point,
@@ -3884,23 +4406,28 @@ class AutoPickPlaceNode(Node):
             self.get_logger().warn(f"{label}: IK 不可用，回退到位姿目标规划")
         for idx, ori in enumerate(orientations, start=1):
             if self._send_pose_goal(target, ori, f"{label}_pose[{idx}]"):
-                if self._pick_pose_guard_ok(label):
-                    if self._is_tcp_near_target(target):
-                        return True
+                guard_ok = self._pick_pose_guard_ok(label) and self._place_pose_guard_ok(label)
+                if guard_ok and self._is_tcp_near_target(target):
+                    return True
+                if not guard_ok:
+                    self.get_logger().warn(
+                        f"{label}_pose[{idx}]: 命中姿态护栏，尝试用预设种子姿态恢复"
+                    )
+                else:
                     self.get_logger().warn(
                         f"{label}_pose[{idx}]: 执行后 TCP 未到达目标邻域，视为失败并继续尝试"
                     )
-                    continue
-                self.get_logger().warn(
-                    f"{label}_pose[{idx}]: 命中抓取姿态护栏，尝试用预设种子姿态恢复"
-                )
                 seed = self._preferred_seed_for_target(target, mode)
                 if self._send_move(seed, f"{label}_pose_recover_seed"):
                     if self._send_pose_goal(target, ori, f"{label}_pose_retry[{idx}]"):
-                        if self._pick_pose_guard_ok(f"{label}_pose_retry[{idx}]") and self._is_tcp_near_target(target):
+                        retry_guard_ok = (
+                            self._pick_pose_guard_ok(f"{label}_pose_retry[{idx}]")
+                            and self._place_pose_guard_ok(f"{label}_pose_retry[{idx}]")
+                        )
+                        if retry_guard_ok and self._is_tcp_near_target(target):
                             return True
                     self.get_logger().warn(
-                        f"{label}_pose_retry[{idx}]: 脱困后仍未到达目标，继续尝试其他候选"
+                        f"{label}_pose_retry[{idx}]: 脱困后仍未到达目标或仍命中姿态护栏，继续尝试其他候选"
                     )
         return False
 
@@ -3972,6 +4499,7 @@ class AutoPickPlaceNode(Node):
         )
         state_ok = self._suction_attached is True
         follow_ok = follow_dz is not None and follow_dz >= min_follow_z
+        near_follow_ok = follow_dz is not None and follow_dz >= max(0.0, min_follow_z - 0.0025)
         has_live_pose = self._logged_rect and (rect_z_before is not None and rect_z_after is not None)
         require_follow_if_live_pose = self._param_bool("pickup_probe_require_follow_if_live_pose")
         allow_unverified = self._param_bool("allow_unverified_sim_attach")
@@ -3982,10 +4510,13 @@ class AutoPickPlaceNode(Node):
             follow_text = "N/A" if follow_dz is None else f"{follow_dz:.4f}m"
             reason = f"{state_label} | physical_follow_dz={follow_text}, suction_state={self._suction_attached}"
         elif require_follow_if_live_pose and has_live_pose:
-            success = follow_ok
+            # 仿真中 follow_dz 存在毫米级抖动；当吸附状态已确认时，允许小幅度近阈值误差。
+            success = follow_ok or (state_ok and near_follow_ok)
             if success:
-                if state_ok:
+                if state_ok and follow_ok:
                     state_label = "STATE_SUCTION_AND_FOLLOW: suction=OK + follow=OK"
+                elif state_ok and near_follow_ok:
+                    state_label = "STATE_SUCTION_NEAR_FOLLOW: suction=OK + follow≈OK (near threshold)"
                 else:
                     state_label = "STATE_FOLLOW_ONLY: suction=FAIL + follow=OK (话题延迟)"
             elif state_ok and not follow_ok:
@@ -4023,7 +4554,9 @@ class AutoPickPlaceNode(Node):
                 "success": success,
                 "state_ok": state_ok,
                 "follow_ok": follow_ok,
+                "near_follow_ok": near_follow_ok,
                 "follow_dz": follow_dz,
+                "min_follow_z": min_follow_z,
                 "fake_attach_active": self._fake_attach_active,
                 "suction_attached": self._suction_attached,
             },
@@ -4175,6 +4708,31 @@ class AutoPickPlaceNode(Node):
             ):
                 self.get_logger().debug(
                     f"[reject_ik] pick_pose_guard: "
+                    f"j2={j2:.3f}[{j2_min:.2f},{j2_max:.2f}], "
+                    f"j3={j3:.3f}[{j3_min:.2f},{j3_max:.2f}], "
+                    f"j4={j4:.3f}|<={j4_abs_max:.2f}, "
+                    f"j5={j5:.3f}[{j5_min:.2f},{j5_max:.2f}], "
+                    f"j6={j6:.3f}|<={j6_abs_max:.2f}"
+                )
+                return True
+        if mode == "place" and self._param_bool("place_pose_guard_enabled"):
+            j2_min = float(self.get_parameter("place_pose_guard_joint2_min").value)
+            j2_max = float(self.get_parameter("place_pose_guard_joint2_max").value)
+            j3_min = float(self.get_parameter("place_pose_guard_joint3_min").value)
+            j3_max = float(self.get_parameter("place_pose_guard_joint3_max").value)
+            j5_min = float(self.get_parameter("place_pose_guard_joint5_min").value)
+            j5_max = float(self.get_parameter("place_pose_guard_joint5_max").value)
+            j4_abs_max = float(self.get_parameter("place_pose_guard_joint4_abs_max").value)
+            j6_abs_max = float(self.get_parameter("place_pose_guard_joint6_abs_max").value)
+            if not (
+                j2_min <= j2 <= j2_max
+                and j3_min <= j3 <= j3_max
+                and j5_min <= j5 <= j5_max
+                and abs(j4) <= j4_abs_max
+                and abs(j6) <= j6_abs_max
+            ):
+                self.get_logger().debug(
+                    f"[reject_ik] place_pose_guard: "
                     f"j2={j2:.3f}[{j2_min:.2f},{j2_max:.2f}], "
                     f"j3={j3:.3f}[{j3_min:.2f},{j3_max:.2f}], "
                     f"j4={j4:.3f}|<={j4_abs_max:.2f}, "
@@ -4708,6 +5266,7 @@ class AutoPickPlaceNode(Node):
         carton_ps: PoseStamped | None = None
         place_uses_carton_box = True
         rect_yaw = 0.0
+        conveyor_place_yaw: float | None = None
 
         if use_direct_xyz:
             if len(pick_xyz) != 3 or len(place_xyz) != 3:
@@ -4764,6 +5323,7 @@ class AutoPickPlaceNode(Node):
                     z=float(configured_place_xyz[2]),
                 )
                 place_uses_carton_box = False
+                place_pt, conveyor_place_yaw = self._conveyor_start_place_target(place_pt, half)
                 self.get_logger().info(
                     "放置目标使用 scene_objects.yaml 配置点: "
                     f"({place_pt.x:.3f},{place_pt.y:.3f},{place_pt.z:.3f})"
@@ -4893,7 +5453,15 @@ class AutoPickPlaceNode(Node):
         # 末端执行器矩形与物体矩形对边平行、角对角对齐：
         # 使用 rect_pickup 实际 yaw，抓取和放置保持同一朝向，移动中旋转最小。
         base_pick_yaw = _wrap_to_pi(rect_yaw)
-        base_place_yaw = _wrap_to_pi(rect_yaw)
+        base_place_yaw = _wrap_to_pi(
+            conveyor_place_yaw
+            if (
+                conveyor_place_yaw is not None
+                and (not place_uses_carton_box)
+                and self._param_bool("conveyor_place_align_yaw")
+            )
+            else rect_yaw
+        )
         yaw_delta_set = [0.0, 0.06, -0.06]
         pick_yaw_set = [_wrap_to_pi(base_pick_yaw + d) for d in yaw_delta_set]
         # 当前吸盘接触面定义为本地 +Z，抓取/放置时必须显式令其朝世界 -Z。
@@ -5103,30 +5671,26 @@ class AutoPickPlaceNode(Node):
         if use_dense:
             touch_orient = pick_touch_orientations[0] if pick_touch_orientations else _suction_down_quat(base_pick_yaw)
             dense_step = max(0.001, float(self.get_parameter("dense_waypoint_step_m").value))
-            dense_gain = max(0.1, float(self.get_parameter("dense_waypoint_xy_correction_gain").value))
-            dense_xy_max = max(0.001, float(self.get_parameter("dense_waypoint_xy_correction_max_m").value))
             dense_ori_w = max(0.1, float(self.get_parameter("dense_waypoint_orientation_weight").value))
             dense_settle = max(0.0, float(self.get_parameter("dense_waypoint_settle_sec").value))
-            dense_max_drift = max(0.005, float(self.get_parameter("dense_waypoint_max_xy_drift_m").value))
-            dense_ok = self._move_cartesian_dense_waypoints(
+            self.get_logger().info(
+                "pick_touch: 已完成中心线校正，直接执行固定XY垂直下压，不再逐步横向修正"
+            )
+            dense_ok = self._move_cartesian_vertical_waypoints(
                 touch,
                 touch_orient,
-                top,
                 half,
                 mode="pick",
-                label="pick_touch_dense",
+                label="pick_touch_vertical",
                 waypoint_step_m=dense_step,
-                xy_correction_gain=dense_gain,
-                xy_correction_max_m=dense_xy_max,
-                orientation_correction_weight=dense_ori_w,
+                orientation_weight=dense_ori_w,
                 settle_sec_per_waypoint=dense_settle,
-                max_xy_drift_m=dense_max_drift,
             )
             if not dense_ok:
                 if pick_contact_collision_relaxed:
                     self._set_pick_contact_collision_allowed(False)
                 self.get_logger().error(
-                    "pick_touch 失败：密途径点下压检测到碰撞/横向漂移，"
+                    "pick_touch 失败：固定XY垂直下压未成功，"
                     "为避免继续推走物体，已禁止回退到常规下压"
                 )
                 return
@@ -5384,8 +5948,9 @@ class AutoPickPlaceNode(Node):
             )
             place_retreat = self._place_retreat_point(place_pt, carton_ps, post_place_retreat)
         else:
-            # 地面放置：place_pt.z 代表地面高度，计算 TCP 接触点（使物体底面接触地面）
-            place_touch_z = place_pt.z + half[2] + suction_contact_offset
+            # 支撑面放置：place_pt.z 代表传送带/地面顶面高度。
+            # TCP 目标需让吸盘接触物体顶面，因此高度为：支撑面 + 物体整高 + 吸盘偏移。
+            place_touch_z = place_pt.z + 2.0 * half[2] + suction_contact_offset
             place_release_target = Point(x=place_pt.x, y=place_pt.y, z=place_touch_z)
             place_above = Point(
                 x=place_pt.x,
@@ -5411,26 +5976,51 @@ class AutoPickPlaceNode(Node):
             self._pub_detach.publish(Empty())
             self.get_logger().error("place_above 失败（已尝试提高高度与 Pose 回退）")
             return
+        if not self._verify_place_hover_pose(place_above, "place_hover_verify"):
+            self._stop_fake_attach("place_hover_verify 失败")
+            self._pub_detach.publish(Empty())
+            self.get_logger().error("place_above 命中坏姿态/坏朝向护栏，终止本轮放置")
+            return
         if self._fake_attach_active:
             self._snap_fake_attach_pose(half, "place_above_snap", attempts=3)
         time.sleep(0.6)
 
         # 像抓取一样下降到底面接触后再释放，而不是空中直接扔下
         self._set_motion_profile("near")
-        place_inside_used = self._move_with_z_scan(
-            place_release_target,
-            place_orientations,
-            [0.0, 0.02, 0.04, 0.06],
-            mode="place",
-            label="place_touch" if not place_uses_carton_box else "place_inside",
-        )
+        if not place_uses_carton_box:
+            # 传送带放置统一走“固定 XY 垂直入带”，避免 MoveIt 直接到接触点时尝试不自然姿态，
+            # 也避免看起来像在半空释放。
+            place_label = "place_touch_vertical"
+            dense_step = max(0.03, float(self.get_parameter("place_dense_waypoint_step_m").value))
+            dense_ori_w = max(0.1, float(self.get_parameter("place_dense_orientation_weight").value))
+            dense_settle = max(0.0, float(self.get_parameter("place_dense_settle_sec").value))
+            place_ok = self._move_cartesian_vertical_waypoints(
+                place_release_target,
+                planned_place_orientation,
+                half,
+                mode="place",
+                label=place_label,
+                waypoint_step_m=dense_step,
+                orientation_weight=dense_ori_w,
+                settle_sec_per_waypoint=dense_settle,
+            )
+            place_inside_used = place_release_target if place_ok else None
+        else:
+            place_inside_used = self._move_with_z_scan(
+                place_release_target,
+                place_orientations,
+                [0.0, 0.02, 0.04, 0.06],
+                mode="place",
+                label="place_touch" if not place_uses_carton_box else "place_inside",
+            )
         if place_inside_used is not None:
             time.sleep(0.5)
         else:
+            if not place_uses_carton_box:
+                self.get_logger().error("place_touch 失败：禁止在传送带上方空中释放，停止本轮任务")
+                return
             place_inside_used = place_above_used
-            self.get_logger().warn(
-                "place_touch 失败，将在上方释放" if not place_uses_carton_box else "place_inside 失败，将在箱口上方释放"
-            )
+            self.get_logger().warn("place_inside 失败，将在箱口上方释放")
 
         self.get_logger().info("释放 detach")
         self._release_rect_at_planned_place(
@@ -5438,6 +6028,9 @@ class AutoPickPlaceNode(Node):
             planned_place_orientation,
             half,
             "place_release_planned",
+        )
+        released_rect_pose = self._planned_rect_pose_at_place(
+            place_inside_used, planned_place_orientation, half
         )
         time.sleep(0.2)
         self._set_pick_contact_collision_allowed(True)
@@ -5457,6 +6050,25 @@ class AutoPickPlaceNode(Node):
         else:
             time.sleep(0.3)
         self._set_pick_contact_collision_allowed(False)
+
+        if not place_uses_carton_box:
+            # #region agent log
+            _agent_debug_log_active(
+                "auto_pick_place.py:run_pipeline:before_transfer_stage",
+                "about to run transfer stage",
+                "H2",
+                {
+                    "place_uses_carton_box": bool(place_uses_carton_box),
+                    "conveyor_transport_enabled": bool(self._param_bool("conveyor_transport_enabled")),
+                },
+            )
+            # #endregion
+            if not self._run_stage(
+                StageName.TRANSFER,
+                lambda: self._run_conveyor_transport(released_rect_pose, half),
+                "传送带输送失败",
+            ):
+                self.get_logger().warn("传送带输送失败，继续执行回 home")
 
         self._refresh_joint_state(1.0)
         self._set_motion_profile("default")
@@ -5517,6 +6129,14 @@ def main() -> None:
     # #endregion
     rclpy.init()
     node = AutoPickPlaceNode()
+    # #region agent log
+    _agent_debug_log_active(
+        "auto_pick_place.py:main",
+        "auto_pick_process_started",
+        "H1",
+        {"node_name": "cs612_auto_pick_place"},
+    )
+    # #endregion
     executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
 

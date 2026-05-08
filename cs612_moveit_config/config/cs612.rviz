@@ -191,7 +191,7 @@ Visualization Manager:
         Value: /monitored_planning_scene
       Robot Description: robot_description
       Scene Geometry:
-        Scene Alpha: 1
+        Scene Alpha: 0.35
         Scene Color: 245; 245; 245
         Scene Display Time: 0.2
         Show Scene Geometry: true

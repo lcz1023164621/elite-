@@ -212,6 +212,14 @@
       <pose>2.60725 -0.99329 0.03013 0 0 0</pose>
     </include>
 
+    <!-- 中间传送带：位于 arm1 (cs612) 与 arm2 (cs612_static_2) 之间的几何中点，
+         方向与两机械臂连线一致。模型原点在底面中心。 -->
+    <include>
+      <name>middle_conveyor</name>
+      <uri>model://middle_conveyor</uri>
+      <pose>1.00825 -0.35547 0.0 0 0 -0.338955</pose>
+    </include>
+
     <!-- GUI 配置：内嵌 JointPositionController 面板 -->
     <gui fullscreen="0">
 

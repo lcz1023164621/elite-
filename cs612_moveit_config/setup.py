@@ -67,6 +67,7 @@ data_files = [
 data_files.extend(collect_tree_data_files("my_arms"))
 data_files.extend(collect_tree_data_files("worlds"))
 data_files.extend(collect_tree_data_files("arms_models"))
+data_files.extend(collect_tree_data_files("models/middle_conveyor"))
 
 # 使用 scripts= 安装可执行文件：直接 import main，不依赖 setuptools 生成的
 # importlib.metadata 包装器（在 colcon 安装不完整或缺 dist-info 时会 PackageNotFoundError）。

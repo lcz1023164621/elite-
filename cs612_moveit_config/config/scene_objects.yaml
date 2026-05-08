@@ -26,6 +26,20 @@ carton_box:
   # 放置时 TCP 目标：内腔上方（避免撞壁，需根据吸盘长度微调）
   place_height_above_floor: 0.18
 
+middle_conveyor:
+  # 与 worlds/my_world.sdf 中 middle_conveyor 保持一致
+  model_pose_xyz: [1.00825, -0.35547, 0.0]
+  model_pose_rpy: [0.0, 0.0, -0.338955]
+  size_xyz: [1.50, 0.30, 0.20]
+  # IFRA 替换后主驱动为 track 线速度，此参数仅用于兼容旧配置。
+  roller_radius_m: 0.03
+  # 传送带顶面高度（belt collision 中心 0.200 + 半高 0.005）。
+  top_surface_z: 0.205
+  # 传送带起始边缘（靠近 arm1）坐标。程序会按物体半长+margin 向传送带内部偏移，
+  # 使 rect_pickup 前缘对齐起点、物体中心落在皮带上。
+  start_xyz: [0.300923, -0.106094, 0.205]
+  place_inset_margin_m: 0.04
+
 place_target:
-  # 与 rect_pickup 初始位置 (-0.82, 0.30) 关于原点对称的地面放置点
-  tcp_xyz: [0.82, -0.30, 0.0]
+  # 这里保留传送带起始边缘；auto_pick_place 会换算为物体中心放置点。
+  tcp_xyz: [0.300923, -0.106094, 0.205]

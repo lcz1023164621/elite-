@@ -127,6 +127,10 @@ class PlanningSceneSpawner(Node):
         self._carton_floor_t = float(cbox.get("floor_thickness", 0.006))
         self._ground_size = [4.0, 4.0]
         self._ground_thickness = 0.02
+        mconv = self._cfg.get("middle_conveyor") or {}
+        self._conveyor_size: list[float] = list(mconv.get("size_xyz", [1.50, 0.30, 0.20]))
+        self._conveyor_pose: list[float] = list(mconv.get("model_pose_xyz", [1.00825, -0.35547, 0.0]))
+        self._conveyor_rpy: list[float] = list(mconv.get("model_pose_rpy", [0.0, 0.0, -0.338955]))
         cp = cbox.get("model_pose_xyz", [-0.82, 0.30, 0.0])
         self._carton_fallback = PoseStamped()
         self._carton_fallback.header.frame_id = "base_link"
@@ -379,6 +383,45 @@ class PlanningSceneSpawner(Node):
                     _point_off(cp, cq, 0.0, -wcy, half_h),
                     cq,
                     [bx, wt, bz],
+                ),
+            ]
+        )
+        # middle_conveyor 静态碰撞体。视觉 mesh 由 Gazebo/RViz marker 显示；
+        # MoveIt 这里只保留薄顶面和较小底座，避免 RViz 中一个实心大盒遮住 IFRA 传送带外观。
+        cv_q = _quat_from_rpy(
+            float(self._conveyor_rpy[0]),
+            float(self._conveyor_rpy[1]),
+            float(self._conveyor_rpy[2]),
+        )
+        cv_pose_z = float(self._conveyor_pose[2])
+        cv_sx = float(self._conveyor_size[0])
+        cv_sy = float(self._conveyor_size[1])
+        cv_sz = float(self._conveyor_size[2])
+        top_thickness = min(0.025, max(0.01, 0.10 * cv_sz))
+        body_height = max(0.02, cv_sz - top_thickness)
+        top_c = Point(
+            x=float(self._conveyor_pose[0]),
+            y=float(self._conveyor_pose[1]),
+            z=cv_pose_z + cv_sz - 0.5 * top_thickness,
+        )
+        body_c = Point(
+            x=float(self._conveyor_pose[0]),
+            y=float(self._conveyor_pose[1]),
+            z=cv_pose_z + 0.5 * body_height,
+        )
+        objects.extend(
+            [
+                _make_box(
+                    "scene_middle_conveyor_top",
+                    top_c,
+                    cv_q,
+                    [cv_sx, cv_sy, top_thickness],
+                ),
+                _make_box(
+                    "scene_middle_conveyor_body",
+                    body_c,
+                    cv_q,
+                    [cv_sx, max(0.08, cv_sy * 0.45), body_height],
                 ),
             ]
         )

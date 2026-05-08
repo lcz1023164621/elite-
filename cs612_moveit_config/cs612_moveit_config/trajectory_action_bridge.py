@@ -15,7 +15,6 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64
 
-_ARM_JOINTS = ["Joint1", "Joint2", "Joint3", "Joint4", "Joint5", "Joint6"]
 _ELITE_ARM_JOINTS = [
     "shoulder_pan_joint",
     "shoulder_lift_joint",
@@ -24,10 +23,12 @@ _ELITE_ARM_JOINTS = [
     "wrist_2_joint",
     "wrist_3_joint",
 ]
-_ELITE_TO_LOCAL = {e: j for e, j in zip(_ELITE_ARM_JOINTS, _ARM_JOINTS)}
+_ARM_JOINTS = list(_ELITE_ARM_JOINTS)
+_LOCAL_JOINTS = ["Joint1", "Joint2", "Joint3", "Joint4", "Joint5", "Joint6"]
+_ELITE_TO_LOCAL = {e: j for e, j in zip(_ELITE_ARM_JOINTS, _LOCAL_JOINTS)}
 _LOCAL_TO_ELITE = {j: e for e, j in _ELITE_TO_LOCAL.items()}
 _JOINT_COMMAND_TOPICS = {
-    joint: f"/cs612/joint_command/{joint}" for joint in _ARM_JOINTS
+    joint: f"/cs612/joint_command/{_ELITE_TO_LOCAL[joint]}" for joint in _ARM_JOINTS
 }
 
 
@@ -47,8 +48,8 @@ class TrajectoryActionBridge(Node):
         # 避免机械臂已到达可吸附姿态却被桥接层误判失败。
         self.declare_parameter("goal_tolerance", 0.16)
         self.declare_parameter("goal_soft_tolerance", 0.40)
-        # Joint5 / Joint6 对吸盘中心位置和“是否位于物体顶面”影响较小，允许更宽收敛阈值。
-        self.declare_parameter("loose_tolerance_joints", ["Joint5", "Joint6"])
+        # wrist_2 / wrist_3 对吸盘中心位置和“是否位于物体顶面”影响较小，允许更宽收敛阈值。
+        self.declare_parameter("loose_tolerance_joints", ["wrist_2_joint", "wrist_3_joint"])
         self.declare_parameter("loose_goal_tolerance", 1.20)
         self.declare_parameter("loose_goal_soft_tolerance", 1.40)
         self.declare_parameter("goal_settle_timeout_sec", 45.0)
@@ -64,21 +65,21 @@ class TrajectoryActionBridge(Node):
         self._action_server = ActionServer(
             self,
             FollowJointTrajectory,
-            "/arm_controller/follow_joint_trajectory",
+            "/joint_trajectory_controller/follow_joint_trajectory",
             callback_group=self._cb,
             goal_callback=self._goal_cb,
             cancel_callback=self._cancel_cb,
             execute_callback=self._execute_cb,
         )
         self.get_logger().info(
-            "已启动 FollowJointTrajectory 桥接：/arm_controller/follow_joint_trajectory"
+            "已启动 FollowJointTrajectory 桥接：/joint_trajectory_controller/follow_joint_trajectory"
         )
 
     def _canonical_joint(self, name: str) -> str | None:
         if name in _ARM_JOINTS:
             return name
-        if name in _ELITE_TO_LOCAL:
-            return _ELITE_TO_LOCAL[name]
+        if name in _LOCAL_TO_ELITE:
+            return _LOCAL_TO_ELITE[name]
         return None
 
     def _on_joint_states(self, msg: JointState) -> None:
@@ -164,13 +165,18 @@ class TrajectoryActionBridge(Node):
         deadline = time.monotonic() + max(0.1, timeout_sec)
         next_publish = 0.0
         while time.monotonic() < deadline:
+            if not rclpy.ok():
+                return "fail"
             if self._goal_reached(names, positions, strict_tolerance, soft_mode=False):
                 return "strict"
             if self._goal_reached(names, positions, soft_tolerance, soft_mode=True):
                 return "soft"
             now = time.monotonic()
             if now >= next_publish:
-                self._publish_joint_positions(names, positions)
+                try:
+                    self._publish_joint_positions(names, positions)
+                except Exception:
+                    return "fail"
                 next_publish = now + republish_period
             time.sleep(0.02)
         if self._goal_reached(names, positions, strict_tolerance, soft_mode=False):
@@ -228,14 +234,28 @@ class TrajectoryActionBridge(Node):
                     break
                 time.sleep(min(wait_cap, remain))
 
-            self._publish_joint_positions(joint_names, list(point.positions))
+            try:
+                self._publish_joint_positions(joint_names, list(point.positions))
+            except Exception:
+                goal_handle.abort()
+                result = FollowJointTrajectory.Result()
+                result.error_code = FollowJointTrajectory.Result.INVALID_GOAL
+                result.error_string = "Joint command publish failed during shutdown or bridge teardown"
+                return result
 
             feedback.desired = point
             feedback.actual.positions = [self._latest_positions.get(j, 0.0) for j in joint_names]
             feedback.error.positions = [
                 d - a for d, a in zip(feedback.desired.positions, feedback.actual.positions)
             ]
-            goal_handle.publish_feedback(feedback)
+            try:
+                goal_handle.publish_feedback(feedback)
+            except Exception:
+                goal_handle.abort()
+                result = FollowJointTrajectory.Result()
+                result.error_code = FollowJointTrajectory.Result.INVALID_GOAL
+                result.error_string = "Action feedback publish failed during shutdown or bridge teardown"
+                return result
 
         final_positions = list(points[-1].positions)
         reach_status = self._wait_until_goal_reached(joint_names, final_positions)

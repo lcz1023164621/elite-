@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
+from ament_index_python.packages import get_package_share_directory
 import rclpy
 import yaml
 import tf2_ros
@@ -88,6 +89,11 @@ class WorldMarkersNode(Node):
         self.declare_parameter("place_height_above_floor", 0.18)
         self.declare_parameter("carton_fallback_pose_xyz", _load_carton_fallback_from_share() or [-0.82, 0.30, 0.0])
         self.declare_parameter("use_scene_yaml_fallback", True)
+        self.declare_parameter("middle_conveyor_size_xyz", [1.50, 0.30, 0.20])
+        self.declare_parameter("middle_conveyor_pose_xyz", [1.00825, -0.35547, 0.0])
+        self.declare_parameter("middle_conveyor_pose_rpy", [0.0, 0.0, -0.338955])
+        self.declare_parameter("conveyor_place_inset_margin_m", 0.04)
+        self.declare_parameter("box_half_size_xyz", [0.10, 0.07, 0.04])
 
         self._rect: PoseStamped | None = None
         self._carton: PoseStamped | None = None
@@ -243,6 +249,36 @@ class WorldMarkersNode(Node):
         m.ns = ns
         m.id = marker_id
         m.action = Marker.DELETE
+        return m
+
+    def _marker_mesh(
+        self,
+        marker_id: int,
+        ns: str,
+        stamp,
+        origin: Point,
+        orientation: Quaternion,
+        scale_xyz: Sequence[float],
+        mesh_resource: str,
+        rgba: tuple[float, float, float, float],
+    ) -> Marker:
+        m = Marker()
+        m.header.frame_id = "base_link"
+        m.header.stamp = stamp
+        m.ns = ns
+        m.id = marker_id
+        m.type = Marker.MESH_RESOURCE
+        m.action = Marker.ADD
+        m.pose = Pose(position=origin, orientation=orientation)
+        m.scale.x = float(scale_xyz[0])
+        m.scale.y = float(scale_xyz[1])
+        m.scale.z = float(scale_xyz[2])
+        m.color.r = float(rgba[0])
+        m.color.g = float(rgba[1])
+        m.color.b = float(rgba[2])
+        m.color.a = float(rgba[3])
+        m.mesh_resource = mesh_resource
+        m.mesh_use_embedded_materials = True
         return m
 
     def _marker_sphere(
@@ -479,6 +515,118 @@ class WorldMarkersNode(Node):
                 (0.05, 0.2, 0.05, 0.95),
             )
         )
+
+        # middle_conveyor marker
+        try:
+            cv_size = list(self.get_parameter("middle_conveyor_size_xyz").value)
+            cv_pose = list(self.get_parameter("middle_conveyor_pose_xyz").value)
+            cv_rpy = list(self.get_parameter("middle_conveyor_pose_rpy").value)
+            if len(cv_size) == 3 and len(cv_pose) == 3 and len(cv_rpy) == 3:
+                import math
+                cy, sy = math.cos(cv_rpy[2] * 0.5), math.sin(cv_rpy[2] * 0.5)
+                cp, sp = math.cos(cv_rpy[1] * 0.5), math.sin(cv_rpy[1] * 0.5)
+                cr, sr = math.cos(cv_rpy[0] * 0.5), math.sin(cv_rpy[0] * 0.5)
+                cq = Quaternion(
+                    x=sr * cp * cy - cr * sp * sy,
+                    y=cr * sp * cy + sr * cp * sy,
+                    z=cr * cp * sy - sr * sp * cy,
+                    w=cr * cp * cy + sr * sp * sy,
+                )
+                cc = Point(
+                    x=float(cv_pose[0]),
+                    y=float(cv_pose[1]),
+                    z=float(cv_pose[2]) + 0.5 * float(cv_size[2]),
+                )
+                try:
+                    share = Path(get_package_share_directory("cs612_moveit_config"))
+                    package_mesh = share / "models" / "middle_conveyor" / "meshes" / "conveyor_belt.dae"
+                    source_mesh = Path.cwd() / "models" / "middle_conveyor" / "meshes" / "conveyor_belt.dae"
+                    if package_mesh.is_file():
+                        mesh_resource = "package://cs612_moveit_config/models/middle_conveyor/meshes/conveyor_belt.dae"
+                    elif source_mesh.is_file():
+                        mesh_resource = "file://" + str(source_mesh.resolve())
+                    else:
+                        raise FileNotFoundError(str(package_mesh))
+                    if not hasattr(self, "_middle_conveyor_mesh_logged"):
+                        self._middle_conveyor_mesh_logged = True
+                        self.get_logger().info(f"middle_conveyor RViz mesh: {mesh_resource}")
+                    mesh_yaw = float(cv_rpy[2]) - 1.57079632679
+                    cy_m, sy_m = math.cos(mesh_yaw * 0.5), math.sin(mesh_yaw * 0.5)
+                    mesh_q = Quaternion(x=0.0, y=0.0, z=sy_m, w=cy_m)
+                    out.markers.append(
+                        self._marker_mesh(
+                            20,
+                            "middle_conveyor",
+                            now,
+                            Point(x=float(cv_pose[0]), y=float(cv_pose[1]), z=float(cv_pose[2])),
+                            mesh_q,
+                            [0.64794816415, 1.25, 0.26917900404],
+                            mesh_resource,
+                            (1.0, 1.0, 1.0, 1.0),
+                        )
+                    )
+                except Exception as exc:
+                    if not hasattr(self, "_middle_conveyor_mesh_warned"):
+                        self._middle_conveyor_mesh_warned = True
+                        self.get_logger().warn(f"middle_conveyor mesh 不可用，回退为盒体 marker: {exc}")
+                    out.markers.append(
+                        self._marker_cube(
+                            20, "middle_conveyor", now, cc, cq, cv_size, (0.35, 0.38, 0.42, 0.35)
+                        )
+                    )
+                # 传送带放置中心：物体前缘对齐传送带起点，中心向内偏移半个物体长度。
+                start_offset = 0.5 * float(cv_size[0])
+                cs = math.cos(cv_rpy[2])
+                sn = math.sin(cv_rpy[2])
+                edge_pt = Point(
+                    x=cc.x - cs * start_offset,
+                    y=cc.y - sn * start_offset,
+                    z=float(cv_pose[2]) + float(cv_size[2]) + 0.03,
+                )
+                box_half = list(self.get_parameter("box_half_size_xyz").value)
+                inset = (float(box_half[0]) if len(box_half) > 0 else 0.10) + max(
+                    0.0, float(self.get_parameter("conveyor_place_inset_margin_m").value)
+                )
+                start_pt = Point(
+                    x=edge_pt.x + cs * inset,
+                    y=edge_pt.y + sn * inset,
+                    z=edge_pt.z,
+                )
+                end_center = Point(
+                    x=cc.x + cs * (start_offset - inset),
+                    y=cc.y + sn * (start_offset - inset),
+                    z=edge_pt.z,
+                )
+                out.markers.append(
+                    self._marker_sphere(21, "middle_conveyor", now, start_pt, 0.04, (0.95, 0.25, 0.25, 0.95))
+                )
+                out.markers.append(
+                    self._marker_text(
+                        22,
+                        "middle_conveyor",
+                        now,
+                        Point(x=start_pt.x, y=start_pt.y, z=start_pt.z + 0.06),
+                        "conveyor start / place target",
+                        0.05,
+                        (0.2, 0.05, 0.05, 0.95),
+                    )
+                )
+                out.markers.append(
+                    self._marker_sphere(23, "middle_conveyor", now, end_center, 0.04, (0.20, 0.55, 0.95, 0.95))
+                )
+                out.markers.append(
+                    self._marker_text(
+                        24,
+                        "middle_conveyor",
+                        now,
+                        Point(x=end_center.x, y=end_center.y, z=end_center.z + 0.06),
+                        "conveyor end",
+                        0.05,
+                        (0.05, 0.12, 0.28, 0.95),
+                    )
+                )
+        except Exception:
+            pass
 
         self._pub.publish(out)
 

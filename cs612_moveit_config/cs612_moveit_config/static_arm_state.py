@@ -6,12 +6,9 @@ import time
 from pathlib import Path
 
 import rclpy
-from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
-from tf2_ros.buffer import Buffer
-from tf2_ros.transform_listener import TransformListener
 
 # 与 eli_cs_robot_description/config/initial_positions.yaml 一致（GZ 静止臂初始姿态）
 _DEFAULT_POSITIONS = {
@@ -61,67 +58,10 @@ class StaticArmStateNode(Node):
         self.get_logger().info(
             f"固定 joint_states ({len(self._msg.name)} 关节)，namespace={self.get_namespace()!r}"
         )
-        # #region agent log
-        self._tf_ns = self.get_namespace().strip("/")
-        self._tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
-        self._tf_listener = TransformListener(self._tf_buffer, self)
-        self._tf_probe_fired = False
-        self._tf_probe_timer = self.create_timer(15.0, self._tf_probe_once)
-        # #endregion
 
     def _tick(self) -> None:
         self._msg.header.stamp = self.get_clock().now().to_msg()
         self._pub.publish(self._msg)
-
-    def _tf_probe_once(self) -> None:
-        # #region agent log
-        if getattr(self, "_tf_probe_fired", True):
-            return
-        self._tf_probe_fired = True
-        try:
-            self._tf_probe_timer.cancel()
-        except BaseException:
-            pass
-
-        ns = getattr(self, "_tf_ns", "")
-        now = self.get_clock().now()
-        chains = {
-            "world_to_ns_world": ("world", f"{ns}/world"),
-            "world_to_ns_base": ("world", f"{ns}/base_link"),
-        }
-        results: dict[str, object] = {}
-        for label, (src, dst) in chains.items():
-            try:
-                tr = self._tf_buffer.lookup_transform(src, dst, now, timeout=Duration(seconds=4.0))
-                results[label] = {
-                    "ok": True,
-                    "t": [
-                        tr.transform.translation.x,
-                        tr.transform.translation.y,
-                        tr.transform.translation.z,
-                    ],
-                }
-            except Exception as ex:  # noqa: BLE001 - 调试探针
-                results[label] = {"ok": False, "err": f"{type(ex).__name__}: {ex}"[:400]}
-
-        frames_blob = ""
-        try:
-            frames_blob = self._tf_buffer.all_frames_as_yaml()  # type: ignore[union-attr]
-        except BaseException:
-            pass
-
-        _debug_log(
-            "static_arm_state.py:_tf_probe_once",
-            "tf_chain_probe",
-            "H_tf",
-            {
-                "namespace": ns,
-                "chains": results,
-                "frames_has_ns": ns in frames_blob if ns else False,
-                "frames_yaml_head": frames_blob[:800] if frames_blob else "",
-            },
-        )
-        # #endregion
 
 
 def main() -> None:

@@ -1,0 +1,116 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="middle_conveyor">
+    <!-- IFRA conveyor architecture adapted to existing footprint -->
+    <static>false</static>
+    <self_collide>false</self_collide>
+
+    <link name="frame_link">
+      <gravity>false</gravity>
+      <inertial>
+        <mass>80.0</mass>
+        <inertia>
+          <ixx>8.0</ixx>
+          <ixy>0.0</ixy>
+          <ixz>0.0</ixz>
+          <iyy>8.0</iyy>
+          <iyz>0.0</iyz>
+          <izz>8.0</izz>
+        </inertia>
+      </inertial>
+
+      <visual name="ifra_conveyor_visual">
+        <pose>0 0 0 0 0 -1.57079632679</pose>
+        <geometry>
+          <mesh>
+            <uri>model://middle_conveyor/meshes/conveyor_belt.dae</uri>
+            <scale>0.64794816415 1.25 0.26917900404</scale>
+          </mesh>
+        </geometry>
+      </visual>
+
+      <collision name="frame_collision">
+        <pose>0 0 0.06 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>1.50 0.30 0.12</size>
+          </box>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="world_fixed" type="fixed">
+      <parent>world</parent>
+      <child>frame_link</child>
+    </joint>
+
+    <link name="belt_link">
+      <gravity>false</gravity>
+      <self_collide>false</self_collide>
+      <inertial>
+        <mass>2.0</mass>
+        <inertia>
+          <ixx>0.02</ixx>
+          <ixy>0.0</ixy>
+          <ixz>0.0</ixz>
+          <iyy>0.02</iyy>
+          <iyz>0.0</iyz>
+          <izz>0.02</izz>
+        </inertia>
+      </inertial>
+      <collision name="belt_collision">
+        <pose>0 0 0.200 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>1.46 0.26 0.010</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>120.0</mu>
+              <mu2>120.0</mu2>
+            </ode>
+            <torsional>
+              <coefficient>800.0</coefficient>
+              <patch_radius>0.10</patch_radius>
+            </torsional>
+          </friction>
+          <contact>
+            <ode>
+              <kp>500000.0</kp>
+              <kd>2000.0</kd>
+              <max_vel>0.02</max_vel>
+              <min_depth>0.0005</min_depth>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+    </link>
+
+    <joint name="belt_drive_joint" type="prismatic">
+      <parent>frame_link</parent>
+      <child>belt_link</child>
+      <axis>
+        <xyz>1 0 0</xyz>
+        <limit>
+          <lower>-1e16</lower>
+          <upper>1e16</upper>
+          <effort>500.0</effort>
+          <velocity>1.2</velocity>
+        </limit>
+        <dynamics>
+          <friction>0.0</friction>
+          <damping>0.01</damping>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <plugin filename="ignition-gazebo-joint-controller-system"
+            name="ignition::gazebo::systems::JointController">
+      <joint_name>belt_drive_joint</joint_name>
+      <topic>/middle_conveyor/track_cmd_vel</topic>
+      <initial_velocity>0.0</initial_velocity>
+    </plugin>
+  </model>
+</sdf>

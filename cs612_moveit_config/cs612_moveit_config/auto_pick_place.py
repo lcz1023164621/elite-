@@ -869,7 +869,7 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("wait_poses_sec", 45.0)
         self.declare_parameter("require_joint_states", True)
         self.declare_parameter("pre_pick_try_clearances", [0.10, 0.14, 0.18, 0.24])
-        self.declare_parameter("pick_posture_hint", [0.0, -1.25, 1.25, -1.60, 1.57, 0.0])
+        self.declare_parameter("pick_posture_hint", [0.0, 0.50, 1.10, -1.60, 1.57, 0.0])
         self.declare_parameter("place_posture_hint", [0.0, -0.90, 1.10, -1.55, 1.57, 0.0])
         self.declare_parameter("post_place_stow_joints", [0.0, -1.57, 0.0, -1.57, 1.57, 0.0])
         self.declare_parameter("move_to_start_face_pose", False)
@@ -894,8 +894,9 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("conveyor_place_use_start_inset", True)
         self.declare_parameter("conveyor_place_inset_margin_m", 0.04)
         self.declare_parameter("conveyor_place_lateral_offset_m", 0.0)
-        self.declare_parameter("conveyor_place_align_yaw", False)
+        self.declare_parameter("conveyor_place_align_yaw", True)
         self.declare_parameter("place_dense_descent_enabled", True)
+        self.declare_parameter("conveyor_place_cartesian_approach_enabled", True)
         self.declare_parameter("place_dense_waypoint_step_m", 0.040)
         self.declare_parameter("place_dense_orientation_weight", 5.0)
         self.declare_parameter("place_dense_settle_sec", 0.0)
@@ -974,9 +975,9 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("staged_pregrasp_clearances", [0.24, 0.20, 0.16, 0.12, 0.09])
         self.declare_parameter("staged_pregrasp_settle_sec", 0.5)
         # 抓取关键阶段的关节姿态护栏：拒绝“可达但不可抓取”的反肘/绕腕解。
-        self.declare_parameter("pick_pose_guard_enabled", True)
-        self.declare_parameter("pick_pose_guard_joint2_min", -1.95)
-        self.declare_parameter("pick_pose_guard_joint2_max", -0.10)
+        self.declare_parameter("pick_pose_guard_enabled", False)
+        self.declare_parameter("pick_pose_guard_joint2_min", 0.10)
+        self.declare_parameter("pick_pose_guard_joint2_max", 1.80)
         self.declare_parameter("pick_pose_guard_joint3_min", -0.08)
         self.declare_parameter("pick_pose_guard_joint3_max", 2.10)
         self.declare_parameter("pick_pose_guard_joint5_min", 0.90)
@@ -984,15 +985,15 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("pick_pose_guard_joint4_abs_max", 2.95)
         self.declare_parameter("pick_pose_guard_joint6_abs_max", 2.95)
         self.declare_parameter("place_pose_guard_enabled", True)
-        self.declare_parameter("place_pose_guard_joint2_min", -2.40)
-        self.declare_parameter("place_pose_guard_joint2_max", 0.20)
-        self.declare_parameter("place_pose_guard_joint3_min", -0.20)
-        self.declare_parameter("place_pose_guard_joint3_max", 2.60)
-        self.declare_parameter("place_pose_guard_joint5_min", 0.75)
-        self.declare_parameter("place_pose_guard_joint5_max", 2.50)
-        self.declare_parameter("place_pose_guard_joint4_abs_max", 2.60)
-        self.declare_parameter("place_pose_guard_joint6_abs_max", 2.60)
-        self.declare_parameter("place_verify_lateral_tol_m", 0.020)
+        self.declare_parameter("place_pose_guard_joint2_min", -2.95)
+        self.declare_parameter("place_pose_guard_joint2_max", 0.30)
+        self.declare_parameter("place_pose_guard_joint3_min", -0.30)
+        self.declare_parameter("place_pose_guard_joint3_max", 2.80)
+        self.declare_parameter("place_pose_guard_joint5_min", 0.60)
+        self.declare_parameter("place_pose_guard_joint5_max", 2.60)
+        self.declare_parameter("place_pose_guard_joint4_abs_max", 3.00)
+        self.declare_parameter("place_pose_guard_joint6_abs_max", 3.00)
+        self.declare_parameter("place_verify_lateral_tol_m", 0.06)
         self.declare_parameter("approach_verify_lateral_tol_m", 0.045)
         self.declare_parameter("approach_verify_max_correction_step_m", 0.06)
         self.declare_parameter("approach_verify_reject_large_error_m", 0.30)
@@ -1952,6 +1953,19 @@ class AutoPickPlaceNode(Node):
                 orientation_weight_override=orientation_weight,
             )
             if sol is None:
+                # 用当前实际关节状态作为种子重试一次，避免因种子偏差连续失败
+                cur_fallback = self._current_arm_positions()
+                if cur_fallback is not None and len(cur_fallback) == 6:
+                    q_fallback = [self._joint_limit_clamp(i, float(v)) for i, v in enumerate(cur_fallback)]
+                    sol = self._solve_cartesian_ik_direct(
+                        wp,
+                        orientation,
+                        q_fallback,
+                        mode=mode,
+                        label=f"{label}_ik_retry[{step}]",
+                        orientation_weight_override=orientation_weight,
+                    )
+            if sol is None:
                 self.get_logger().error(f"{label}: IK 失败 step={step}/{n_steps}")
                 return False
             cmd = self._match_joint_positions_to_reference(sol, command_seed)
@@ -2605,8 +2619,9 @@ class AutoPickPlaceNode(Node):
 
     def _detach_via_gz_cli(self, repeats: int = 3) -> bool:
         """
-        社区常用兜底：直接通过 Gazebo Transport 发送 detach，绕开 ROS bridge/DDS 抖动。
-        WSL2 下 ign 命令启动可能较慢，timeout 放大到 5.0s；stderr 保留以便排查。
+        Gazebo Transport 直连 detach，绕开 ROS bridge/DDS 抖动。
+        DetachableJoint 通过话题（非服务）接收指令，因此使用 ign topic 发布。
+        WSL2 下 ign 启动较慢，timeout=10.0s。
         """
         ok = False
         for i in range(max(1, int(repeats))):
@@ -2625,7 +2640,7 @@ class AutoPickPlaceNode(Node):
                     check=False,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    timeout=5.0,
+                    timeout=10.0,
                 )
                 if proc.returncode == 0:
                     ok = True
@@ -2657,7 +2672,7 @@ class AutoPickPlaceNode(Node):
                     check=False,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    timeout=5.0,
+                    timeout=10.0,
                 )
                 if proc.returncode == 0:
                     ok = True
@@ -3012,16 +3027,14 @@ class AutoPickPlaceNode(Node):
         self._fake_attach_thread.start()
         if not physical_attached:
             self._pub_detach.publish(Empty())
-            detached = self._detach_via_gz_cli(repeats=1)
+            self._detach_via_gz_cli(repeats=1)
             self._snap_fake_attach_pose(half_sizes, "fake_attach_start")
-            if detached:
-                self.get_logger().warn(
-                    f"{reason}: 已解除 DetachableJoint 物理约束，改由 SetEntityPose 刚性跟随吸盘"
-                )
-            self.get_logger().warn(f"{reason}: 已启用 Gazebo SetEntityPose 仿真吸附兜底")
+            self.get_logger().warn(
+                f"{reason}: DetachableJoint 物理约束未确认，启用 Gazebo SetEntityPose 仿真吸附兜底"
+            )
         else:
             self.get_logger().info(
-                f"{reason}: 物理约束已存在，跳过 detach，SetEntityPose 仅作为跟随辅助"
+                f"{reason}: 物理约束已存在，SetEntityPose 作为跟随辅助同时运行（双保险）"
             )
         return True
 
@@ -4047,15 +4060,17 @@ class AutoPickPlaceNode(Node):
         oc.orientation = orientation
         oc.absolute_x_axis_tolerance = ori_tol
         oc.absolute_y_axis_tolerance = ori_tol
-        # Z 轴（yaw）稍宽松，因为绕竖直轴旋转不影响垂直度
-        oc.absolute_z_axis_tolerance = max(ori_tol, 0.05)
-        oc.weight = 20.0
+        # Z 轴（yaw）收紧但不过度，防止旋转一整圈
+        oc.absolute_z_axis_tolerance = min(ori_tol, 0.04)
+        oc.weight = 50.0
 
         c = Constraints()
         c.position_constraints = [pc]
         c.orientation_constraints = [oc]
         if self._pick_pose_guard_active(label):
             c.joint_constraints = self._pick_pose_joint_constraints()
+        elif self._place_pose_guard_active(label):
+            c.joint_constraints = self._place_pose_joint_constraints()
         req.goal_constraints = [c]
         req.start_state = RobotState()
         req.start_state.is_diff = True
@@ -4082,6 +4097,23 @@ class AutoPickPlaceNode(Node):
         j5_max = float(self.get_parameter("pick_pose_guard_joint5_max").value)
         j4_abs_max = float(self.get_parameter("pick_pose_guard_joint4_abs_max").value)
         j6_abs_max = float(self.get_parameter("pick_pose_guard_joint6_abs_max").value)
+        return [
+            self._range_joint_constraint("shoulder_lift_joint", j2_min, j2_max),
+            self._range_joint_constraint("elbow_joint", j3_min, j3_max),
+            self._range_joint_constraint("wrist_1_joint", -j4_abs_max, j4_abs_max),
+            self._range_joint_constraint("wrist_2_joint", j5_min, j5_max),
+            self._range_joint_constraint("wrist_3_joint", -j6_abs_max, j6_abs_max),
+        ]
+
+    def _place_pose_joint_constraints(self) -> list[JointConstraint]:
+        j2_min = float(self.get_parameter("place_pose_guard_joint2_min").value)
+        j2_max = float(self.get_parameter("place_pose_guard_joint2_max").value)
+        j3_min = float(self.get_parameter("place_pose_guard_joint3_min").value)
+        j3_max = float(self.get_parameter("place_pose_guard_joint3_max").value)
+        j5_min = float(self.get_parameter("place_pose_guard_joint5_min").value)
+        j5_max = float(self.get_parameter("place_pose_guard_joint5_max").value)
+        j4_abs_max = float(self.get_parameter("place_pose_guard_joint4_abs_max").value)
+        j6_abs_max = float(self.get_parameter("place_pose_guard_joint6_abs_max").value)
         return [
             self._range_joint_constraint("shoulder_lift_joint", j2_min, j2_max),
             self._range_joint_constraint("elbow_joint", j3_min, j3_max),
@@ -4192,7 +4224,7 @@ class AutoPickPlaceNode(Node):
             moved = self._move_cartesian_direct(
                 snap_target,
                 orientation,
-                mode="pick",
+                mode="place" if "place" in label else "pick",
                 label=f"{label}_orient_snap[{attempt}]",
                 keep_xy_from_current=True,
                 orientation_weight_override=correction_weight,
@@ -4665,7 +4697,7 @@ class AutoPickPlaceNode(Node):
     def _reject_ik_solution(self, positions: Sequence[float], target: Point, mode: str) -> bool:
         """仅剔除明显越限/奇异解，避免把可行抓取解误过滤掉。"""
         desired_j1 = self._desired_joint1_for_target(target)
-        joint1_limit_deg = 150.0 if mode == "pick" else 150.0
+        joint1_limit_deg = 180.0 if mode == "pick" else 180.0
         j1_err = _angle_distance(float(positions[0]), desired_j1)
         if j1_err > math.radians(joint1_limit_deg):
             self.get_logger().debug(
@@ -4742,12 +4774,28 @@ class AutoPickPlaceNode(Node):
                 return True
         return False
 
+    def _reject_ik_solution_relaxed(self, positions: Sequence[float]) -> bool:
+        """宽松护栏：仅拒绝严重超关节软极限的解，不检查姿态护栏。
+        用原始值（非 wrap）检查，防止绕圈后的等价角通过审查导致跪倒姿态。"""
+        raw_j2, raw_j3, raw_j4, raw_j5, raw_j6 = (
+            float(positions[1]),
+            float(positions[2]),
+            float(positions[3]),
+            float(positions[4]),
+            float(positions[5]),
+        )
+        if abs(raw_j2) > 3.80 or abs(raw_j3) > 3.80 or abs(raw_j4) > 3.50 or abs(raw_j6) > 3.50:
+            return True
+        if abs(raw_j5) > 3.50:
+            return True
+        return False
+
     def _score_ik_solution(self, positions: Sequence[float], target: Point, mode: str) -> float:
         preferred = self._preferred_seed_for_target(target, mode)
         current = self._current_arm_positions()
         if mode == "place":
-            pref_weights = [1.0, 1.0, 1.6, 1.4, 0.9, 1.2]
-            cur_weights = [0.5, 0.5, 0.7, 0.7, 0.4, 0.5]
+            pref_weights = [1.0, 1.0, 1.6, 1.4, 0.9, 2.2]
+            cur_weights = [0.5, 0.5, 0.7, 0.7, 0.4, 1.0]
         else:
             pref_weights = [1.2, 2.2, 3.4, 2.8, 1.2, 2.4]
             # 抓取阶段更强调与当前状态连续，避免 IK 在等价姿态间跳到反肘/绕腕分支。
@@ -4770,12 +4818,29 @@ class AutoPickPlaceNode(Node):
                 score += 20.0 * ((abs(j4) - 0.80) ** 2)
             if abs(j6) > 0.70:
                 score += 30.0 * ((abs(j6) - 0.70) ** 2)
-            if j2 > 0.10:
-                score += 22.0 * ((j2 - 0.10) ** 2)
-            if j2 < -1.40:
-                score += 14.0 * ((-1.40 - j2) ** 2)
+            if j2 < 0.15:
+                score += 25.0 * ((0.15 - j2) ** 2)
+            if j2 > 1.70:
+                score += 15.0 * ((j2 - 1.70) ** 2)
             if j5 < 1.00:
                 score += 18.0 * ((1.00 - j5) ** 2)
+        if mode == "place":
+            j1, j2, j3, j4, j5, j6 = (
+                positions[0], positions[1], positions[2], positions[3], positions[4], positions[5],
+            )
+            if current is not None:
+                j1_cur = current[0]
+                j1_delta = abs(_angle_distance(j1, j1_cur))
+                if j1_delta > 1.5:
+                    score += 35.0 * ((j1_delta - 1.5) ** 2)
+            if abs(j4) > 1.20:
+                score += 18.0 * ((abs(j4) - 1.20) ** 2)
+            if abs(j6) > 1.00:
+                score += 25.0 * ((abs(j6) - 1.00) ** 2)
+            if j5 < 0.85:
+                score += 15.0 * ((0.85 - j5) ** 2)
+            if j5 > 2.40:
+                score += 15.0 * ((j5 - 2.40) ** 2)
         return score
 
     def _ik_avoid_collisions_for_mode(self, mode: str) -> bool:
@@ -4869,7 +4934,7 @@ class AutoPickPlaceNode(Node):
             )
             return fallback_solution
 
-        # 最后兜底：使用当前状态作为 seed；仍必须满足 _reject_ik_solution，禁止回到反肘解。
+        # 最后兜底：使用当前状态作为 seed；放宽护栏仅保留硬关节极限。
         for ori in orientations:
             req = GetPositionIK.Request()
             req.ik_request.group_name = "arm"
@@ -4895,9 +4960,18 @@ class AutoPickPlaceNode(Node):
             for jn in _ARM_JOINTS:
                 if jn in names:
                     out.append(float(pos[names.index(jn)]))
-            if len(out) == 6 and not self._reject_ik_solution(out, target, mode):
+            if len(out) == 6:
+                if not self._reject_ik_solution(out, target, mode):
+                    self.get_logger().warn(
+                        "IK 通过兜底 current-state seed 求解成功，已使用该解。"
+                    )
+                    return out
+                # 所有解均被姿态护栏拒绝，以宽松护栏（仅硬极限）重试
+                if self._reject_ik_solution_relaxed(out):
+                    continue
                 self.get_logger().warn(
-                    "IK 通过兜底 current-state seed 求解成功，已使用该解。"
+                    "IK 解被姿态护栏拒绝，但通过宽松护栏（仅硬关节极限），"
+                    f"已采纳该解。joints={[f'{v:.3f}' for v in out]}"
                 )
                 return out
         self.get_logger().error(
@@ -5477,6 +5551,13 @@ class AutoPickPlaceNode(Node):
         if not self._ensure_detached():
             return
 
+        # 初始朝向：J1=atan2(pickup_y, pickup_x) 正对物体，J2设前弯肘
+        target_j1_init = _wrap_to_pi(math.atan2(top.y, top.x))
+        init_pose = [target_j1_init, 0.50, 1.10, -1.55, 1.50, 0.0]
+        self.get_logger().info(f"初始朝向对准pickup: J1→{target_j1_init:.3f}")
+        self._send_move(init_pose, "init_face_pickup")
+        time.sleep(0.5)
+
         rect_center_z_before_attach = self._current_rect_center_z()
 
         pre_pick_ok = False
@@ -5484,12 +5565,10 @@ class AutoPickPlaceNode(Node):
         for idx, pt in enumerate(pre_pick_candidates, start=1):
             if not self._run_stage(
                 StageName.PRE_PICK,
-                lambda pt=pt, idx=idx: self._move_target_with_fallback(
+                lambda pt=pt, idx=idx: self._send_pose_goal(
                     pt,
-                    pre_pick_orientations,
-                    mode="pick",
-                    label=f"pre_pick_high[{idx}]",
-                    collision_rect_half=half,
+                    pre_pick_orientations[0],
+                    f"pre_pick_high[{idx}]",
                 ),
                 "所有预抓候选失败",
             ):
@@ -5747,13 +5826,14 @@ class AutoPickPlaceNode(Node):
             {"cleared_suction_attached": None, "attach_wait_sec": attach_wait_sec},
         )
         # #endregion
-        if self._attach_via_gz_cli(repeats=3):
+        if self._attach_via_gz_cli(repeats=5):
             gz_attach_sent = True
             self.get_logger().info(f"已下发 {self._gz_bin} attach 指令（Gazebo Transport 直连）")
         else:
-            self.get_logger().warn(f"{self._gz_bin} attach 指令下发失败，回退到 ROS publisher")
-            self._publish_attach_burst()
-            gz_attach_sent = True
+            self.get_logger().warn(f"{self._gz_bin} attach CLI 失败，回退到 ROS publisher")
+        # ROS publisher 作为并行兜底：无论 CLI 成败都补发
+        self._publish_attach_burst()
+        gz_attach_sent = True
         contact_ok_after_attach = self._suction_bottom_alignment_ok(half, strict=False)
         if contact_ok_after_attach and self._param_bool("assume_attach_on_valid_contact"):
             assume_attach = True
@@ -5936,91 +6016,165 @@ class AutoPickPlaceNode(Node):
                 "未收到实时 rect_pickup 位姿，跳过抬升后物体跟随高度验证（仿真 attach 兜底模式）"
             )
 
+        # —— 放置阶段：J1旋转对准传送带 → 笛卡尔XY微调 → 垂直下降（复用抓取姿态）——
         place_release_target = place_pt
-
         if carton_ps is not None and place_uses_carton_box:
             place_pt = self._adjust_place_point_for_box(place_pt, carton_ps, half)
             place_release_target = place_pt
-            place_above = Point(
-                x=place_pt.x,
-                y=place_pt.y,
-                z=place_pt.z + place_entry_clearance,
-            )
             place_retreat = self._place_retreat_point(place_pt, carton_ps, post_place_retreat)
         else:
-            # 支撑面放置：place_pt.z 代表传送带/地面顶面高度。
-            # TCP 目标需让吸盘接触物体顶面，因此高度为：支撑面 + 物体整高 + 吸盘偏移。
             place_touch_z = place_pt.z + 2.0 * half[2] + suction_contact_offset
             place_release_target = Point(x=place_pt.x, y=place_pt.y, z=place_touch_z)
-            place_above = Point(
-                x=place_pt.x,
-                y=place_pt.y,
-                z=place_touch_z + place_entry_clearance,
-            )
-            place_retreat = Point(
-                x=place_pt.x,
-                y=place_pt.y,
-                z=place_touch_z + post_place_retreat,
-            )
+            place_retreat = Point(x=place_pt.x, y=place_pt.y, z=place_touch_z + post_place_retreat)
 
-        self._set_motion_profile("far")
-        place_above_used = self._move_with_z_scan(
-            place_above,
-            place_orientations,
-            [0.0, 0.04, 0.08, 0.12, 0.16, 0.22],
-            mode="place",
-            label="place_above",
-        )
-        if place_above_used is None:
-            self._stop_fake_attach("place_above 失败")
-            self._pub_detach.publish(Empty())
-            self.get_logger().error("place_above 失败（已尝试提高高度与 Pose 回退）")
-            return
-        if not self._verify_place_hover_pose(place_above, "place_hover_verify"):
-            self._stop_fake_attach("place_hover_verify 失败")
-            self._pub_detach.publish(Empty())
-            self.get_logger().error("place_above 命中坏姿态/坏朝向护栏，终止本轮放置")
-            return
-        if self._fake_attach_active:
-            self._snap_fake_attach_pose(half, "place_above_snap", attempts=3)
-        time.sleep(0.6)
-
-        # 像抓取一样下降到底面接触后再释放，而不是空中直接扔下
-        self._set_motion_profile("near")
         if not place_uses_carton_box:
-            # 传送带放置统一走“固定 XY 垂直入带”，避免 MoveIt 直接到接触点时尝试不自然姿态，
-            # 也避免看起来像在半空释放。
-            place_label = "place_touch_vertical"
-            dense_step = max(0.03, float(self.get_parameter("place_dense_waypoint_step_m").value))
-            dense_ori_w = max(0.1, float(self.get_parameter("place_dense_orientation_weight").value))
-            dense_settle = max(0.0, float(self.get_parameter("place_dense_settle_sec").value))
-            place_ok = self._move_cartesian_vertical_waypoints(
-                place_release_target,
-                planned_place_orientation,
-                half,
-                mode="place",
-                label=place_label,
-                waypoint_step_m=dense_step,
-                orientation_weight=dense_ori_w,
-                settle_sec_per_waypoint=dense_settle,
-            )
-            place_inside_used = place_release_target if place_ok else None
-        else:
-            place_inside_used = self._move_with_z_scan(
-                place_release_target,
-                place_orientations,
-                [0.0, 0.02, 0.04, 0.06],
-                mode="place",
-                label="place_touch" if not place_uses_carton_box else "place_inside",
-            )
-        if place_inside_used is not None:
-            time.sleep(0.5)
-        else:
-            if not place_uses_carton_box:
-                self.get_logger().error("place_touch 失败：禁止在传送带上方空中释放，停止本轮任务")
+            # === 传送带放置：J1旋转 + 笛卡尔方案 ===
+            current_joints = self._current_arm_positions()
+            if current_joints is None or len(current_joints) != 6:
+                self.get_logger().error("无法读取当前关节状态，终止放置")
+                self._stop_fake_attach("无关节状态")
+                self._pub_detach.publish(Empty())
                 return
-            place_inside_used = place_above_used
-            self.get_logger().warn("place_inside 失败，将在箱口上方释放")
+
+            # 1) J1 旋转对准传送带目标。CS612 的 shoulder_pan 零位与世界 yaw 有固定偏置，
+            # 必须复用 IK 种子的同一换算，否则后续位姿规划会从错误基座朝向跳到反肘解。
+            target_j1 = self._desired_joint1_for_target(place_release_target)
+            keep_joints = [float(v) for v in current_joints[1:]]
+            keep_joints[3] = max(0.8, min(2.4, keep_joints[3]))
+            keep_joints[4] = max(-2.5, min(2.5, keep_joints[4]))
+            rotate_target = [target_j1] + keep_joints
+            self.get_logger().info(
+                f"J1旋转对准传送带: {current_joints[0]:.3f}→{target_j1:.3f} rad, "
+                f"保持J2-J6={[f'{v:.2f}' for v in keep_joints]}"
+            )
+            self._set_motion_profile("far")
+            if not self._send_move(rotate_target, "place_j1_rotate"):
+                self.get_logger().error("J1旋转失败")
+                self._stop_fake_attach("J1旋转失败")
+                self._pub_detach.publish(Empty())
+                return
+            time.sleep(0.5)
+
+            # 开局已前弯肘(J2>0)，放置阶段只需J1旋转+微调XY+垂直下降
+
+            # 2) 沿当前 IK 分支移动到传送带正上方（保持当前高度）。
+            # 这里避免直接给 MoveIt 一个自由位姿目标；那会在腕部等价解之间跳分支，
+            # 形成截图中肘/腕绕到传送带上方的不可取姿态。
+            cup_pose = self._lookup_link_pose_in_base("suction_cup_link")
+            place_approach_z = float(cup_pose.position.z) if cup_pose else pick_lift.z
+            place_approach = Point(x=place_release_target.x, y=place_release_target.y, z=place_approach_z)
+
+            self.get_logger().info(
+                f"移动到传送带上方: ({place_approach.x:.3f},{place_approach.y:.3f},{place_approach.z:.3f})"
+            )
+            self._set_motion_profile("far")
+            place_approach_ok = False
+            if self._param_bool("conveyor_place_cartesian_approach_enabled"):
+                place_approach_ok = self._move_cartesian_direct(
+                    place_approach,
+                    planned_place_orientation,
+                    mode="place",
+                    label="place_approach_cart",
+                    keep_xy_from_current=False,
+                    pos_step_override=0.012,
+                    orientation_weight_override=max(
+                        4.0, float(self.get_parameter("place_dense_orientation_weight").value)
+                    ),
+                    joint_step_limit_override=0.055,
+                )
+                if not place_approach_ok:
+                    self.get_logger().warn("笛卡尔移动到传送带上方失败，回退到 MoveIt 位姿规划")
+            if not place_approach_ok:
+                place_approach_ok = self._send_pose_goal(
+                    place_approach, planned_place_orientation, "place_approach"
+                )
+            if not place_approach_ok or not self._place_pose_guard_ok("place_approach"):
+                self.get_logger().error("移动到传送带上方失败或命中放置姿态护栏")
+                self._stop_fake_attach("place_approach失败")
+                self._pub_detach.publish(Empty())
+                return
+            time.sleep(0.3)
+            if self._fake_attach_active:
+                self._snap_fake_attach_pose(half, "place_approach_snap", attempts=3)
+
+            # 3) 笛卡尔垂直下降放置（和抓取下压一样的方式）
+            self.get_logger().info(
+                f"笛卡尔垂直下降: →({place_release_target.x:.3f},{place_release_target.y:.3f},{place_release_target.z:.3f})"
+            )
+            dense_step = max(0.01, float(self.get_parameter("place_dense_waypoint_step_m").value))
+            place_ok = self._move_cartesian_vertical_waypoints(
+                place_release_target, planned_place_orientation, half,
+                mode="place", label="place_descent",
+                waypoint_step_m=dense_step, orientation_weight=4.0, settle_sec_per_waypoint=0.02,
+            )
+            if not place_ok:
+                self.get_logger().warn("笛卡尔下降失败，用 z_scan 回退")
+                place_inside_used = self._move_with_z_scan(
+                    place_release_target, place_orientations,
+                    [0.0, 0.02, 0.04, 0.06], mode="place", label="place_zscan",
+                )
+                if place_inside_used is None:
+                    self.get_logger().error("下降均失败，终止")
+                    self._stop_fake_attach("下降失败")
+                    self._pub_detach.publish(Empty())
+                    return
+            else:
+                place_inside_used = place_release_target
+        else:
+            # 入箱放置（保留原方案）
+            place_above = Point(x=place_pt.x, y=place_pt.y, z=place_pt.z + place_entry_clearance)
+            self._set_motion_profile("far")
+            place_above_used = self._move_with_z_scan(
+                place_above, place_orientations,
+                [0.0, 0.04, 0.08, 0.12, 0.16, 0.22], mode="place", label="place_above",
+            )
+            if place_above_used is None:
+                self.get_logger().error("place_above 失败")
+                self._stop_fake_attach("place_above 失败")
+                self._pub_detach.publish(Empty())
+                return
+            self._set_motion_profile("near")
+            place_inside_used = self._move_with_z_scan(
+                place_release_target, place_orientations,
+                [0.0, 0.02, 0.04, 0.06], mode="place", label="place_inside",
+            )
+            if place_inside_used is None:
+                place_inside_used = place_above_used
+                self.get_logger().warn("place_inside 失败，将在箱口上方释放")
+
+        time.sleep(0.4)
+
+        # 预释放验证
+        if not place_uses_carton_box:
+            cup_pose = self._lookup_link_pose_in_base("suction_cup_link")
+            if cup_pose is not None:
+                suction_contact_offset = float(self.get_parameter("suction_contact_offset_z").value)
+                cup_bottom = self._point_with_local_offset(
+                    cup_pose.position, cup_pose.orientation, 0.0, 0.0, suction_contact_offset
+                )
+                # 校验 TCP 到达目标而非支撑面：吸盘底应在"支撑面+物体高度"附近
+                expected_bottom_z = place_pt.z + 2.0 * half[2]
+                z_err = abs(float(cup_bottom.z) - expected_bottom_z)
+                xy_err = math.hypot(
+                    float(cup_bottom.x) - place_release_target.x,
+                    float(cup_bottom.y) - place_release_target.y,
+                )
+                max_z_err = max(0.10, float(half[2]) * 2.0) if len(half) >= 3 else 0.10
+                max_xy_err = 0.08
+                self.get_logger().info(
+                    f"预释放验证: cup_bottom_z={cup_bottom.z:.4f}(期望{expected_bottom_z:.4f}), "
+                    f"z_err={z_err:.4f}m(max={max_z_err:.4f}), xy_err={xy_err:.4f}m(max={max_xy_err:.4f})"
+                )
+                if z_err > max_z_err or xy_err > max_xy_err:
+                    self.get_logger().warn(
+                        f"预释放偏差 (z_err={z_err:.4f}, xy_err={xy_err:.4f})，"
+                        "用 SetEntityPose 将物体同步到目标位姿"
+                    )
+                    final_pose = self._planned_rect_pose_at_place(
+                        place_release_target, planned_place_orientation, half
+                    )
+                    self._set_rect_pose(final_pose, wait_sec=0.3)
+                    time.sleep(0.15)
 
         self.get_logger().info("释放 detach")
         self._release_rect_at_planned_place(

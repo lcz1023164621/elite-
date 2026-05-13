@@ -897,7 +897,7 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("conveyor_place_align_yaw", True)
         self.declare_parameter("place_dense_descent_enabled", True)
         self.declare_parameter("conveyor_place_cartesian_approach_enabled", True)
-        self.declare_parameter("place_dense_waypoint_step_m", 0.040)
+        self.declare_parameter("place_dense_waypoint_step_m", 0.060)
         self.declare_parameter("place_dense_orientation_weight", 5.0)
         self.declare_parameter("place_dense_settle_sec", 0.0)
         self.declare_parameter("conveyor_transport_enabled", True)
@@ -956,14 +956,14 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("orientation_correction_retries", 6)
         # 下压前在目标上方悬停验证 XY 对齐和朝向的等待时间（秒），
         # 给 Gazebo 关节控制器足够收敛时间，避免首次下压因位置未收敛而失败。
-        self.declare_parameter("pre_touch_settle_sec", 2.0)
+        self.declare_parameter("pre_touch_settle_sec", 0.5)
         # 下压完成后、检查吸附前的稳定等待时间（秒），
         # 让 Gazebo 物理仿真充分计算接触响应后再判定吸附结果。
         self.declare_parameter("post_touch_settle_sec", 1.2)
         # 发送 attach 指令前额外等待秒数，确保吸盘与物体接触已稳定。
         self.declare_parameter("pre_attach_settle_sec", 0.6)
         self.declare_parameter("dense_waypoint_descent_enabled", True)
-        self.declare_parameter("dense_waypoint_step_m", 0.012)
+        self.declare_parameter("dense_waypoint_step_m", 0.020)
         self.declare_parameter("dense_waypoint_xy_correction_gain", 0.65)
         self.declare_parameter("dense_waypoint_xy_correction_max_m", 0.015)
         self.declare_parameter("dense_waypoint_orientation_weight", 3.0)
@@ -994,7 +994,7 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("place_pose_guard_joint4_abs_max", 3.00)
         self.declare_parameter("place_pose_guard_joint6_abs_max", 3.00)
         self.declare_parameter("place_verify_lateral_tol_m", 0.06)
-        self.declare_parameter("approach_verify_lateral_tol_m", 0.045)
+        self.declare_parameter("approach_verify_lateral_tol_m", 0.060)
         self.declare_parameter("approach_verify_max_correction_step_m", 0.06)
         self.declare_parameter("approach_verify_reject_large_error_m", 0.30)
         self.declare_parameter("approach_verify_relaxed_lateral_tol_m", 0.045)
@@ -1993,8 +1993,42 @@ class AutoPickPlaceNode(Node):
             self.get_logger().info(
                 f"{label} 完成: pos_err={pos_err:.4f}m down_cos={-down_axis[2]:.4f}"
             )
-            return pos_err <= max(0.025, float(self.get_parameter("cartesian_ik_pos_tol_m").value) * 6.0)
+            pos_tol = max(0.030, float(self.get_parameter("cartesian_ik_pos_tol_m").value) * 6.0)
+            if mode == "place":
+                # 放置阶段后面还有预释放验证和 SetEntityPose 最终贴合；这里不应因
+                # Gazebo/controller 的几厘米收敛滞后误判为“不可放置”，否则会触发
+                # z_scan / 位姿规划回退，反而破坏缓慢垂直放置流程。
+                pos_tol = max(pos_tol, 0.080)
+            return pos_err <= pos_tol
         return True
+
+    def _conveyor_place_hover_ready(
+        self,
+        target: Point,
+        orientation: Quaternion,
+        label: str,
+    ) -> bool:
+        pose = self._current_tcp_pose()
+        if pose is None:
+            return False
+        p, q = pose
+        xy_err = math.hypot(float(p.x) - float(target.x), float(p.y) - float(target.y))
+        z_clearance = float(p.z) - float(target.z)
+        down_axis = _quat_rotate_vec(q, 0.0, 0.0, 1.0)
+        down_cos = -down_axis[2]
+        ori_err = self._quat_angle(q, orientation)
+        ok = (
+            xy_err <= 0.100
+            and z_clearance >= 0.040
+            and (down_cos >= 0.930 or ori_err <= 0.450)
+            and self._place_pose_guard_ok(label)
+        )
+        self.get_logger().info(
+            f"{label}: 传送带 hover 判定 xy_err={xy_err:.4f}m, "
+            f"z_clearance={z_clearance:.4f}m, down_cos={down_cos:.4f}, "
+            f"ori_err={ori_err:.3f}rad, ok={ok}"
+        )
+        return ok
 
     def _estimate_pick_offset_xy(self, rect_half: Sequence[float]) -> tuple[float, float] | None:
         cup_pose = self._lookup_link_pose_in_base("suction_cup_link")
@@ -3548,29 +3582,24 @@ class AutoPickPlaceNode(Node):
                 )
                 return False
 
-            step_norm = math.hypot(dx, dy)
-            if step_norm > max_fix_step and step_norm > 1e-9:
-                scale = max_fix_step / step_norm
-                dx *= scale
-                dy *= scale
             corrected_approach = Point(
                 x=current_approach.x - dx,
                 y=current_approach.y - dy,
                 z=current_approach.z,
             )
-            moved = self._move_target_with_moveit_pose(
-                corrected_approach, orientations, f"{label}_fix[{attempt}]"
+            moved = self._move_cartesian_direct(
+                corrected_approach,
+                target_orient,
+                mode="pick",
+                label=f"{label}_fix[{attempt}]",
+                orientation_weight_override=max(1.0, float(self.get_parameter("orientation_correction_weight").value)),
             )
             if not moved:
-                moved = self._move_cartesian_direct(
-                    corrected_approach,
-                    target_orient,
-                    mode="pick",
-                    label=f"{label}_fix_cart[{attempt}]",
-                    orientation_weight_override=max(1.0, float(self.get_parameter("orientation_correction_weight").value)),
+                moved = self._move_target_with_moveit_pose(
+                    corrected_approach, orientations, f"{label}_fix_pose[{attempt}]"
                 )
             if moved:
-                time.sleep(0.8)
+                time.sleep(0.3)
                 current_approach = Point(x=corrected_approach.x, y=corrected_approach.y, z=corrected_approach.z)
             else:
                 self.get_logger().warn(f"{label}[{attempt}]: 校正运动失败")
@@ -4303,6 +4332,8 @@ class AutoPickPlaceNode(Node):
 
     def _pick_pose_guard_active(self, label: str) -> bool:
         if not self._param_bool("pick_pose_guard_enabled"):
+            return False
+        if label.startswith("place_"):
             return False
         # 仅在抓取关键阶段启用，避免影响放置阶段和常规运动。
         guarded_tokens = ("pre_pick", "approach", "pick_", "touch", "realign")
@@ -5552,11 +5583,6 @@ class AutoPickPlaceNode(Node):
             return
 
         # 初始朝向：J1=atan2(pickup_y, pickup_x) 正对物体，J2设前弯肘
-        target_j1_init = _wrap_to_pi(math.atan2(top.y, top.x))
-        init_pose = [target_j1_init, 0.50, 1.10, -1.55, 1.50, 0.0]
-        self.get_logger().info(f"初始朝向对准pickup: J1→{target_j1_init:.3f}")
-        self._send_move(init_pose, "init_face_pickup")
-        time.sleep(0.5)
 
         rect_center_z_before_attach = self._current_rect_center_z()
 
@@ -5673,6 +5699,26 @@ class AutoPickPlaceNode(Node):
                 )
         pre_touch_settle = max(0.5, float(self.get_parameter("pre_touch_settle_sec").value))
         time.sleep(pre_touch_settle)
+        # ── 预修正：IK/位姿规划后 TCP 常有 XY 漂移，始终用笛卡尔拉到精确 approach XY ──
+        cup_pre = self._lookup_link_pose_in_base("suction_cup_link")
+        if cup_pre is not None:
+            cup_btm = self._point_with_local_offset(
+                cup_pre.position, cup_pre.orientation, 0.0, 0.0,
+                float(self.get_parameter("suction_contact_offset_z").value),
+            )
+            lat = math.hypot(float(cup_btm.x) - approach.x, float(cup_btm.y) - approach.y)
+            self.get_logger().info(
+                f"approach 后 lateral={lat:.4f}m，执行笛卡尔预修正拉合到精确 approach XY"
+            )
+            exact_hover = Point(x=approach.x, y=approach.y, z=float(cup_pre.position.z))
+            self._move_cartesian_direct(
+                exact_hover,
+                pick_touch_orientations[0] if pick_touch_orientations else _suction_down_quat(0.0),
+                mode="pick",
+                label="approach_preemptive_xyfix",
+                orientation_weight_override=max(1.0, float(self.get_parameter("orientation_correction_weight").value)),
+            )
+            time.sleep(0.3)
         # ── 下压前验证 approach 位置和朝向收敛，避免首抓因未收敛偏移失败 ──
         if not self._verify_approach_pose(
             approach, pick_touch_orientations, half, "approach_verify"
@@ -5766,13 +5812,21 @@ class AutoPickPlaceNode(Node):
                 settle_sec_per_waypoint=dense_settle,
             )
             if not dense_ok:
-                if pick_contact_collision_relaxed:
-                    self._set_pick_contact_collision_allowed(False)
-                self.get_logger().error(
-                    "pick_touch 失败：固定XY垂直下压未成功，"
-                    "为避免继续推走物体，已禁止回退到常规下压"
-                )
-                return
+                settle_after_dense = max(0.3, float(self.get_parameter("post_touch_settle_sec").value))
+                time.sleep(settle_after_dense)
+                if self._suction_bottom_alignment_ok(half, strict=False):
+                    self.get_logger().warn(
+                        "pick_touch: 固定XY垂直下压 TCP 位置误差超出阈值，"
+                        "但吸盘几何接触验证已通过，将继续执行吸附流程"
+                    )
+                else:
+                    if pick_contact_collision_relaxed:
+                        self._set_pick_contact_collision_allowed(False)
+                    self.get_logger().error(
+                        "pick_touch 失败：固定XY垂直下压未成功，"
+                        "且吸盘未与物体几何接触，为避免继续推走物体，已禁止回退到常规下压"
+                    )
+                    return
         else:
             self._set_motion_profile("near")
             if not self._run_stage(
@@ -6076,18 +6130,27 @@ class AutoPickPlaceNode(Node):
                     mode="place",
                     label="place_approach_cart",
                     keep_xy_from_current=False,
-                    pos_step_override=0.012,
+                    pos_step_override=0.040,
                     orientation_weight_override=max(
                         4.0, float(self.get_parameter("place_dense_orientation_weight").value)
                     ),
                     joint_step_limit_override=0.055,
                 )
                 if not place_approach_ok:
-                    self.get_logger().warn("笛卡尔移动到传送带上方失败，回退到 MoveIt 位姿规划")
+                    self.get_logger().warn("笛卡尔移动到传送带上方未完全确认，检查当前 hover 是否已可继续")
             if not place_approach_ok:
-                place_approach_ok = self._send_pose_goal(
-                    place_approach, planned_place_orientation, "place_approach"
-                )
+                if self._conveyor_place_hover_ready(
+                    place_release_target, planned_place_orientation, "place_approach_cart"
+                ):
+                    self.get_logger().warn(
+                        "place_approach_cart 未完全满足关节收敛，但 TCP 已在传送带目标上方，"
+                        "继续执行固定 XY 缓慢垂直下降，避免自由位姿规划跳到不可取姿态"
+                    )
+                    place_approach_ok = True
+                else:
+                    place_approach_ok = self._send_pose_goal(
+                        place_approach, planned_place_orientation, "place_approach"
+                    )
             if not place_approach_ok or not self._place_pose_guard_ok("place_approach"):
                 self.get_logger().error("移动到传送带上方失败或命中放置姿态护栏")
                 self._stop_fake_attach("place_approach失败")
@@ -6105,7 +6168,7 @@ class AutoPickPlaceNode(Node):
             place_ok = self._move_cartesian_vertical_waypoints(
                 place_release_target, planned_place_orientation, half,
                 mode="place", label="place_descent",
-                waypoint_step_m=dense_step, orientation_weight=4.0, settle_sec_per_waypoint=0.02,
+                waypoint_step_m=dense_step, orientation_weight=4.0, settle_sec_per_waypoint=0.0,
             )
             if not place_ok:
                 self.get_logger().warn("笛卡尔下降失败，用 z_scan 回退")

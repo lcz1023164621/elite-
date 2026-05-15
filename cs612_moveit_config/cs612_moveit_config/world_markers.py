@@ -88,6 +88,7 @@ class WorldMarkersNode(Node):
         self.declare_parameter("carton_floor_top_z", 0.006)
         self.declare_parameter("place_height_above_floor", 0.18)
         self.declare_parameter("carton_fallback_pose_xyz", _load_carton_fallback_from_share() or [-0.82, 0.30, 0.0])
+        self.declare_parameter("box2_fallback_pose_xyz", [1.68664, -0.13519, 0.0])
         self.declare_parameter("use_scene_yaml_fallback", True)
         self.declare_parameter("middle_conveyor_size_xyz", [1.50, 0.30, 0.20])
         self.declare_parameter("middle_conveyor_pose_xyz", [1.00825, -0.35547, 0.0])
@@ -97,6 +98,7 @@ class WorldMarkersNode(Node):
 
         self._rect: PoseStamped | None = None
         self._carton: PoseStamped | None = None
+        self._box2: PoseStamped | None = None
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -111,6 +113,12 @@ class WorldMarkersNode(Node):
             PoseStamped,
             "/model/carton_box/pose",
             self._on_carton,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            PoseStamped,
+            "/model/box2/pose",
+            self._on_box2,
             qos_profile_sensor_data,
         )
         self.create_subscription(
@@ -165,6 +173,12 @@ class WorldMarkersNode(Node):
             return
         self._carton = msg
 
+    def _on_box2(self, msg: PoseStamped) -> None:
+        p = msg.pose.position
+        if abs(p.x) < 1e-5 and abs(p.y) < 1e-5 and abs(p.z) < 1e-5:
+            return
+        self._box2 = msg
+
     def _on_world_pose_info(self, msg: TFMessage) -> None:
         rect = extract_model_pose(msg, "rect_pickup")
         if rect is not None:
@@ -172,10 +186,13 @@ class WorldMarkersNode(Node):
         carton = extract_model_pose(msg, "carton_box")
         if carton is not None:
             self._on_carton(carton)
+        box2 = extract_model_pose(msg, "box2")
+        if box2 is not None:
+            self._on_box2(box2)
 
     def _pose_to_base(self, ps: PoseStamped) -> PoseStamped:
         raw = (ps.header.frame_id or "").strip()
-        if raw in ("", "world", "arm_world", "map", "base_link", "rect_pickup", "carton_box"):
+        if raw in ("", "world", "arm_world", "map", "base_link", "rect_pickup", "carton_box", "box2"):
             out = PoseStamped()
             out.header.frame_id = "base_link"
             out.header.stamp = ps.header.stamp
@@ -208,6 +225,17 @@ class WorldMarkersNode(Node):
         xyz = list(self.get_parameter("carton_fallback_pose_xyz").value)
         if len(xyz) != 3:
             xyz = [-0.82, 0.30, 0.0]
+        ps = PoseStamped()
+        ps.header.frame_id = "base_link"
+        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.pose.position = Point(x=float(xyz[0]), y=float(xyz[1]), z=float(xyz[2]))
+        ps.pose.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
+        return ps
+
+    def _fallback_box2_pose(self) -> PoseStamped:
+        xyz = list(self.get_parameter("box2_fallback_pose_xyz").value)
+        if len(xyz) != 3:
+            xyz = [1.68664, -0.13519, 0.0]
         ps = PoseStamped()
         ps.header.frame_id = "base_link"
         ps.header.stamp = self.get_clock().now().to_msg()
@@ -513,6 +541,82 @@ class WorldMarkersNode(Node):
                 "carton center / place target",
                 0.05,
                 (0.05, 0.2, 0.05, 0.95),
+            )
+        )
+
+        # box2: cs612_static_2 接力放置容器
+        box2 = self._pose_to_base(self._box2) if self._box2 is not None else self._fallback_box2_pose()
+        b = box2.pose.position
+        bq = box2.pose.orientation
+        box2_color = (0.20, 0.55, 1.0, 0.46)
+        out.markers.append(
+            self._marker_cube(
+                30,
+                "box2",
+                now,
+                self._point_with_local_offset(b, bq, 0.0, 0.0, 0.5 * floor_t),
+                bq,
+                [sx, sy, floor_t],
+                box2_color,
+            )
+        )
+        out.markers.append(
+            self._marker_cube(
+                31,
+                "box2",
+                now,
+                self._point_with_local_offset(b, bq, wall_cx, 0.0, half_h),
+                bq,
+                [wall_t, sy, sz],
+                box2_color,
+            )
+        )
+        out.markers.append(
+            self._marker_cube(
+                32,
+                "box2",
+                now,
+                self._point_with_local_offset(b, bq, -wall_cx, 0.0, half_h),
+                bq,
+                [wall_t, sy, sz],
+                box2_color,
+            )
+        )
+        out.markers.append(
+            self._marker_cube(
+                33,
+                "box2",
+                now,
+                self._point_with_local_offset(b, bq, 0.0, wall_cy, half_h),
+                bq,
+                [sx, wall_t, sz],
+                box2_color,
+            )
+        )
+        out.markers.append(
+            self._marker_cube(
+                34,
+                "box2",
+                now,
+                self._point_with_local_offset(b, bq, 0.0, -wall_cy, half_h),
+                bq,
+                [sx, wall_t, sz],
+                box2_color,
+            )
+        )
+        box2_place_center = self._point_with_local_offset(b, bq, 0.0, 0.0, floor_top_z + place_height)
+        out.markers.append(
+            self._marker_sphere(35, "box2", now, box2_place_center, 0.04, (0.15, 0.55, 1.0, 0.95))
+        )
+        out.markers.append(
+            self._marker_text(
+                36,
+                "box2",
+                now,
+                Point(x=box2_place_center.x, y=box2_place_center.y, z=box2_place_center.z + 0.07),
+                "box2 center / static_2 place target",
+                0.05,
+                (0.04, 0.10, 0.30, 0.95),
             )
         )
 

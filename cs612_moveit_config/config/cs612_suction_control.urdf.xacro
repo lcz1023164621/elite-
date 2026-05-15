@@ -15,6 +15,11 @@
   <xacro:arg name="fake_sensor_commands" default="false" />
   <xacro:arg name="sim_ignition" default="true" />
   <xacro:arg name="simulation_controllers" default="" />
+  <xacro:arg name="controller_manager_name" default="controller_manager" />
+  <xacro:arg name="robot_param_node" default="robot_state_publisher" />
+  <xacro:arg name="suction_topic_ns" default="/cs612/suction" />
+  <xacro:arg name="base_origin_xyz" default="0 0 0" />
+  <xacro:arg name="base_origin_rpy" default="0 0 0" />
   <xacro:arg name="suction_tcp_offset_z" default="0.214" />
   <xacro:arg name="initial_positions_file" default="$(find eli_cs_robot_description)/config/initial_positions.yaml" />
 
@@ -44,14 +49,16 @@
     fake_sensor_commands="$(arg fake_sensor_commands)"
     sim_ignition="$(arg sim_ignition)"
     initial_positions="${xacro.load_yaml(initial_positions_file)}">
-    <origin xyz="0 0 0" rpy="0 0 0" />
+    <origin xyz="$(arg base_origin_xyz)" rpy="$(arg base_origin_rpy)" />
   </xacro:cs_robot>
 
   <xacro:if value="$(arg sim_ignition)">
     <gazebo>
       <plugin filename="libign_ros2_control-system.so" name="ign_ros2_control::IgnitionROS2ControlPlugin">
         <parameters>$(arg simulation_controllers)</parameters>
-        <controller_manager_node_name>$(arg prefix)controller_manager</controller_manager_node_name>
+        <robot_param>robot_description</robot_param>
+        <robot_param_node>$(arg robot_param_node)</robot_param_node>
+        <controller_manager_name>$(arg controller_manager_name)</controller_manager_name>
       </plugin>
     </gazebo>
   </xacro:if>
@@ -146,9 +153,9 @@
       <parent_link>$(arg prefix)suction_cup_link</parent_link>
       <child_model>rect_pickup</child_model>
       <child_link>box_link</child_link>
-      <attach_topic>/cs612/suction/attach</attach_topic>
-      <detach_topic>/cs612/suction/detach</detach_topic>
-      <output_topic>/cs612/suction/state</output_topic>
+      <attach_topic>$(arg suction_topic_ns)/attach</attach_topic>
+      <detach_topic>$(arg suction_topic_ns)/detach</detach_topic>
+      <output_topic>$(arg suction_topic_ns)/state</output_topic>
     </plugin>
   </gazebo>
 </robot>

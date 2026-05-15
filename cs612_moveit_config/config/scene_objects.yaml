@@ -26,6 +26,17 @@ carton_box:
   # 放置时 TCP 目标：内腔上方（避免撞壁，需根据吸盘长度微调）
   place_height_above_floor: 0.18
 
+box2:
+  # box2 位于 cs612_2 右前方（传送带在 cs612_2 左侧）。
+  # cs612_2 world pose=(2.300,-0.600,0.001)，box2 中心约 dx=+0.60, dy=+0.60。
+  model_pose_xyz: [2.90000, 0.00000, 0.0]
+  outer_size_xyz: [0.42, 0.30, 0.22]
+  wall_thickness: 0.008
+  floor_thickness: 0.006
+  floor_top_z: 0.006
+  center_xy: [2.90000, 0.00000]
+  place_height_above_floor: 0.18
+
 middle_conveyor:
   # 与 worlds/my_world.sdf 中 middle_conveyor 保持一致
   model_pose_xyz: [1.00825, -0.35547, 0.0]
@@ -38,7 +49,7 @@ middle_conveyor:
   # 传送带起始边缘（靠近 arm1）坐标。程序会按物体半长+margin 向传送带内部偏移，
   # 使 rect_pickup 前缘对齐起点、物体中心落在皮带上。
   start_xyz: [0.300923, -0.106094, 0.205]
-  place_inset_margin_m: 0.04
+  place_inset_margin_m: 0.28
 
 place_target:
   # 这里保留传送带起始边缘；auto_pick_place 会换算为物体中心放置点。

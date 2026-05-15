@@ -100,7 +100,7 @@ Visualization Manager:
         Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /cs612_static_2/robot_description
+        Value: /cs612_2/robot_description
       Enabled: true
       Links:
         All Links Enabled: true
@@ -108,8 +108,8 @@ Visualization Manager:
         Expand Link Details: false
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
-      Name: StaticArm2RobotModel
-      TF Prefix: cs612_static_2
+      Name: CS612_2RobotModel
+      TF Prefix: ""
       Update Interval: 0
       Value: true
       Visual Enabled: true
@@ -190,6 +190,78 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /monitored_planning_scene
       Robot Description: robot_description
+      Scene Geometry:
+        Scene Alpha: 0.35
+        Scene Color: 245; 245; 245
+        Scene Display Time: 0.2
+        Show Scene Geometry: true
+        Voxel Coloring: Z-Axis
+        Voxel Rendering: Occupied Voxels
+      Scene Robot:
+        Links:
+          All Links Enabled: true
+          Expand Joint Details: false
+          Expand Link Details: false
+          Expand Tree: false
+          Link Tree Style: Links in Alphabetic Order
+        Robot Alpha: 1
+        Show Robot Collision: false
+        Show Robot Visual: true
+      Value: true
+    - Class: moveit_rviz_plugin/MotionPlanning
+      Enabled: true
+      Move Group Namespace: /cs612_2
+      MoveIt_Allow_Approximate_IK: true
+      MoveIt_Planning_Attempts: 10
+      MoveIt_Planning_Time: 5.0
+      MoveIt_Use_Constraint_Aware_IK: false
+      Name: MotionPlanning_CS612_2
+      Planned Path:
+        Color Enabled: true
+        Interrupt Display: false
+        Links:
+          All Links Enabled: true
+        Loop Animation: false
+        Robot Alpha: 0.5
+        Robot Color: 40; 120; 210
+        Show Robot Collision: false
+        Show Robot Visual: true
+        Show Trail: false
+        State Display Time: 0.05 s
+        Trail Step Size: 1
+        Trajectory Topic:
+          Depth: 5
+          Durability Policy: Volatile
+          History Policy: Keep Last
+          Reliability Policy: Reliable
+          Value: /cs612_2/display_planned_path
+      Planning Group: arm
+      Planning Metrics:
+        Payload: 1
+        Show Joint Torques: false
+        Show Manipulability: false
+        Show Manipulability Index: false
+        Show Weight Limit: false
+        TextHeight: 0.08
+      Planning Request:
+        Colliding Link Color: 255; 0; 0
+        Goal State Alpha: 1
+        Goal State Color: 40; 120; 210
+        Interactive Marker Size: 0.2
+        Joint Violation Color: 255; 0; 255
+        Planning Group: arm
+        Query Goal State: true
+        Query Start State: true
+        Show Workspace: false
+        Start State Alpha: 1
+        Start State Color: 0; 180; 90
+      Planning Scene Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /cs612_2/monitored_planning_scene
+      Robot Description: /cs612_2/robot_description
       Scene Geometry:
         Scene Alpha: 0.35
         Scene Color: 245; 245; 245

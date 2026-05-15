@@ -81,7 +81,7 @@ _console_scripts = [
     str(_scripts_dir / "cs612_print_scene_targets"),
     str(_scripts_dir / "cs612_auto_pick_place"),
     str(_scripts_dir / "cs612_world_markers"),
-    str(_scripts_dir / "cs612_static_arm_state"),
+
     str(_scripts_dir / "cs612_planning_scene_spawner"),
     str(_scripts_dir / "cs612_system_watchdog"),
     str(_scripts_dir / "cs612_base_anchor_guard"),

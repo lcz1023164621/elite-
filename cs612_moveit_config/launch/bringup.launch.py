@@ -1,9 +1,11 @@
 """CS612 Gazebo + MoveIt bringup using the official Elite CS ROS 2 stack."""
+import copy
 import json
 import os
 import subprocess
 import time
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -118,6 +120,73 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _prefixed_model_name(name: str, prefix: str) -> str:
+    if not name or name == "world" or name.startswith(prefix):
+        return name
+    return f"{prefix}{name}"
+
+
+def _prefix_srdf(srdf_text: str, *, prefix: str, robot_name: str) -> str:
+    root = ET.fromstring(srdf_text)
+    root.set("name", robot_name)
+    for elem in root.iter():
+        tag = elem.tag.rsplit("}", 1)[-1]
+        if tag == "chain":
+            for attr in ("base_link", "tip_link"):
+                if attr in elem.attrib:
+                    elem.set(attr, _prefixed_model_name(elem.attrib[attr], prefix))
+        elif tag in ("link", "joint"):
+            if "name" in elem.attrib:
+                elem.set("name", _prefixed_model_name(elem.attrib["name"], prefix))
+        elif tag == "end_effector":
+            if "parent_link" in elem.attrib:
+                elem.set("parent_link", _prefixed_model_name(elem.attrib["parent_link"], prefix))
+        elif tag == "disable_collisions":
+            for attr in ("link1", "link2"):
+                if attr in elem.attrib:
+                    elem.set(attr, _prefixed_model_name(elem.attrib[attr], prefix))
+    return ET.tostring(root, encoding="unicode")
+
+
+def _prefix_joint_limits(joint_limits_doc: dict, prefix: str) -> dict:
+    doc = copy.deepcopy(joint_limits_doc)
+    limits = doc.get("joint_limits")
+    if isinstance(limits, dict):
+        doc["joint_limits"] = {
+            _prefixed_model_name(str(name), prefix): value
+            for name, value in limits.items()
+        }
+    return doc
+
+
+def _prefix_ompl_config(ompl_cfg: dict, prefix: str) -> dict:
+    cfg = copy.deepcopy(ompl_cfg)
+    arm_cfg = cfg.get("arm")
+    if isinstance(arm_cfg, dict):
+        projection = arm_cfg.get("projection_evaluator")
+        if isinstance(projection, str) and projection.startswith("joints(") and projection.endswith(")"):
+            joints = [j.strip() for j in projection[len("joints("):-1].split(",") if j.strip()]
+            prefixed_joints = ",".join(_prefixed_model_name(j, prefix) for j in joints)
+            arm_cfg["projection_evaluator"] = f"joints({prefixed_joints})"
+    return cfg
+
+
+def _prefixed_moveit_controllers(prefix: str) -> dict:
+    controller_name = f"{prefix.rstrip('_')}_joint_trajectory_controller"
+    return {
+        "moveit_controller_manager": "moveit_simple_controller_manager/MoveItSimpleControllerManager",
+        "moveit_simple_controller_manager": {
+            "controller_names": [controller_name],
+            controller_name: {
+                "type": "FollowJointTrajectory",
+                "action_ns": "follow_joint_trajectory",
+                "default": True,
+                "joints": [_prefixed_model_name(j, prefix) for j in _ARM_JOINTS],
+            },
+        },
+    }
+
+
 def _find_project_root() -> Path:
     candidates = [Path.cwd().resolve()]
     try:
@@ -138,6 +207,7 @@ def _launch_setup(context, *args, **kwargs):
     moveit_config_dir = Path(get_package_share_directory("cs612_moveit_config"))
     world_file = project_root / "worlds" / "my_world.sdf"
     controllers_file = moveit_config_dir / "config" / "ros2_controllers.yaml"
+    cs612_2_controllers_file = moveit_config_dir / "config" / "cs612_2_ros2_controllers.yaml"
 
     cs_type = LaunchConfiguration("cs_type")
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -164,17 +234,46 @@ def _launch_setup(context, *args, **kwargs):
             "name:=cs612",
             "sim_ignition:=true",
             f"simulation_controllers:={controllers_file}",
+            "controller_manager_name:=controller_manager",
+            "robot_param_node:=robot_state_publisher",
         ],
         text=True,
     )
+    cs612_2_description_content = subprocess.check_output(
+        [
+            "xacro",
+            str(xacro_file),
+            f"cs_type:={cs_type.perform(context)}",
+            "name:=cs612_2",
+            "prefix:=cs612_2_",
+            "sim_ignition:=true",
+            f"simulation_controllers:={cs612_2_controllers_file}",
+            "controller_manager_name:=cs612_2_controller_manager",
+            "robot_param_node:=/cs612_2/robot_state_publisher",
+            "suction_topic_ns:=/cs612_2/suction",
+            "base_origin_xyz:=2.30000 -0.60000 0.00141",
+        ],
+        text=True,
+    )
+    srdf_text = (moveit_config_dir / "config" / "CS612.srdf").read_text(encoding="utf-8")
     robot_description = {"robot_description": robot_description_content}
+    cs612_2_robot_description = {"robot_description": cs612_2_description_content}
     robot_description_semantic = {
-        "robot_description_semantic": (moveit_config_dir / "config" / "CS612.srdf").read_text(encoding="utf-8")
+        "robot_description_semantic": srdf_text
+    }
+    cs612_2_robot_description_semantic = {
+        "robot_description_semantic": _prefix_srdf(srdf_text, prefix="cs612_2_", robot_name="cs612")
     }
     robot_description_kinematics = {"robot_description_kinematics": _load_yaml(moveit_config_dir / "config" / "kinematics.yaml")}
     robot_description_planning = {"robot_description_planning": _load_yaml(moveit_config_dir / "config" / "joint_limits.yaml")}
+    cs612_2_robot_description_kinematics = copy.deepcopy(robot_description_kinematics)
+    cs612_2_robot_description_planning = {
+        "robot_description_planning": _prefix_joint_limits(robot_description_planning["robot_description_planning"], "cs612_2_")
+    }
     ompl_cfg = _load_yaml(moveit_config_dir / "config" / "ompl_planning.yaml")
+    cs612_2_ompl_cfg = _prefix_ompl_config(ompl_cfg, "cs612_2_")
     moveit_controllers = _load_yaml(moveit_config_dir / "config" / "moveit_controllers.yaml")
+    cs612_2_moveit_controllers = _prefixed_moveit_controllers("cs612_2_")
 
     gz_gui_enabled = launch_gz_gui.perform(context).strip().lower() in ("1", "true", "yes", "on")
     gz_flags = "-r -v 4" if gz_gui_enabled else "-r -s -v 4"
@@ -245,6 +344,25 @@ def _launch_setup(context, *args, **kwargs):
         output="screen",
         arguments=["-string", robot_description_content, "-name", "cs612", "-allow_renaming", "false"],
     )
+    spawn_robot2 = Node(
+        package="ros_gz_sim",
+        executable="create",
+        output="screen",
+        arguments=[
+            "-string",
+            cs612_2_description_content,
+            "-name",
+            "cs612_2",
+            "-allow_renaming",
+            "false",
+            "-x",
+            "0.0",
+            "-y",
+            "0.0",
+            "-z",
+            "0.0",
+        ],
+    )
 
     robot_state_publisher = Node(
         package="robot_state_publisher",
@@ -257,96 +375,22 @@ def _launch_setup(context, *args, **kwargs):
         ],
     )
 
-    static_arm_ns_poses = {
-        "cs612_static_2": ("2.01650", "-0.71094", "0.00141"),
-        "cs612_static_3": ("2.60725", "-0.99329", "0.03013"),
-    }
-    static_robot_state_publishers = [
-        Node(
-            package="robot_state_publisher",
-            executable="robot_state_publisher",
-            namespace=ns,
-            output="both",
-            parameters=[
-                robot_description,
-                {"use_sim_time": False},
-                {"publish_robot_description": True},
-                {"frame_prefix": f"{ns}/"},
-                # 仅靠 joint_states；仿真心跳/stamp 漂移时避免因时间戳拒发 TF
-                {"ignore_timestamp": True},
-                {"publish_frequency": 50.0},
-            ],
-            remappings=[
-                ("tf", "/tf"),
-                ("tf_static", "/tf_static"),
-            ],
-        )
-        for ns in static_arm_ns_poses
-    ]
-    static_world_tfs = [
-        Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
-            name=f"{ns}_world_anchor",
-            arguments=[
-                "--x",
-                xyz[0],
-                "--y",
-                xyz[1],
-                "--z",
-                xyz[2],
-                "--qx",
-                "0",
-                "--qy",
-                "0",
-                "--qz",
-                "0",
-                "--qw",
-                "1",
-                "--frame-id",
-                "world",
-                "--child-frame-id",
-                f"{ns}/world",
-            ],
-            parameters=[{"use_sim_time": use_sim_time}],
-            output="log",
-        )
-        for ns, xyz in static_arm_ns_poses.items()
-    ]
-
-    static_arm_joint_publishers = [
-        ExecuteProcess(
-            cmd=[
-                "/usr/bin/python3",
-                "-m",
-                "cs612_moveit_config.static_arm_state",
-                "--ros-args",
-                "-r",
-                f"__ns:=/{ns}",
-                "-p",
-                "publish_hz:=50.0",
-                "-p",
-                "use_sim_time:=false",
-            ],
-            output="screen",
-        )
-        for ns in static_arm_ns_poses
-    ]
-    # #region agent log
-    _debug_log(
-        "bringup.launch.py:_launch_setup",
-        "static_arm_publishers_configured",
-        "H3",
-        {
-            "namespaces": list(static_arm_ns_poses.keys()),
-            "world_children": [f"{ns}/world" for ns in static_arm_ns_poses],
-            "rsp_frame_prefix_mode": "tf_namespace_slash",
-            "static_arm_use_sim_time": False,
-            "joint_state_executable": "cs612_static_arm_state",
-            "joint_state_exec_mode": "/usr/bin/python3 -m cs612_moveit_config.static_arm_state",
-        },
+    cs612_2_robot_state_publisher = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        namespace="cs612_2",
+        output="both",
+        parameters=[
+            cs612_2_robot_description,
+            {"use_sim_time": use_sim_time},
+            {"publish_robot_description": True},
+        ],
+        remappings=[
+            ("joint_states", "/cs612_2_joint_state_broadcaster/joint_states"),
+            ("tf", "/tf"),
+            ("tf_static", "/tf_static"),
+        ],
     )
-    # #endregion
 
     gz_bridge = Node(
         package="ros_gz_bridge",
@@ -373,6 +417,10 @@ def _launch_setup(context, *args, **kwargs):
             "joint_state_broadcaster",
             "--controller-manager",
             "/controller_manager",
+            "--param-file",
+            str(controllers_file),
+            "--switch-timeout",
+            "20.0",
         ],
         output="screen",
     )
@@ -383,6 +431,38 @@ def _launch_setup(context, *args, **kwargs):
             "joint_trajectory_controller",
             "--controller-manager",
             "/controller_manager",
+            "--param-file",
+            str(controllers_file),
+            "--switch-timeout",
+            "20.0",
+        ],
+        output="screen",
+    )
+    cs612_2_joint_state_broadcaster_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "cs612_2_joint_state_broadcaster",
+            "--controller-manager",
+            "/cs612_2_controller_manager",
+            "--param-file",
+            str(cs612_2_controllers_file),
+            "--switch-timeout",
+            "20.0",
+        ],
+        output="screen",
+    )
+    cs612_2_joint_trajectory_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "cs612_2_joint_trajectory_controller",
+            "--controller-manager",
+            "/cs612_2_controller_manager",
+            "--param-file",
+            str(cs612_2_controllers_file),
+            "--switch-timeout",
+            "20.0",
         ],
         output="screen",
     )
@@ -414,6 +494,48 @@ def _launch_setup(context, *args, **kwargs):
                 "publish_transforms_updates": True,
                 "use_sim_time": use_sim_time,
             },
+        ],
+    )
+    cs612_2_move_group = Node(
+        package="moveit_ros_move_group",
+        executable="move_group",
+        namespace="cs612_2",
+        name="move_group",
+        output="screen",
+        parameters=[
+            cs612_2_robot_description,
+            cs612_2_robot_description_semantic,
+            cs612_2_robot_description_kinematics,
+            cs612_2_robot_description_planning,
+            {"planning_pipelines": ["ompl"]},
+            {"ompl": cs612_2_ompl_cfg},
+            cs612_2_moveit_controllers,
+            {
+                "allow_trajectory_execution": True,
+                "moveit_manage_controllers": False,
+                "trajectory_execution.allowed_start_tolerance": 0.10,
+                "trajectory_execution.allowed_execution_duration_scaling": 6.0,
+                "trajectory_execution.allowed_goal_duration_margin": 5.0,
+                "trajectory_execution.execution_duration_monitoring": True,
+                "publish_robot_description": False,
+                "publish_robot_description_semantic": True,
+                "publish_planning_scene": True,
+                "publish_geometry_updates": True,
+                "publish_state_updates": True,
+                "publish_transforms_updates": True,
+                "use_sim_time": use_sim_time,
+            },
+        ],
+        remappings=[
+            ("joint_states", "/cs612_2_joint_state_broadcaster/joint_states"),
+            (
+                "cs612_2_joint_trajectory_controller/follow_joint_trajectory",
+                "/cs612_2_joint_trajectory_controller/follow_joint_trajectory",
+            ),
+            (
+                "/cs612_2/cs612_2_joint_trajectory_controller/follow_joint_trajectory",
+                "/cs612_2_joint_trajectory_controller/follow_joint_trajectory",
+            ),
         ],
     )
 
@@ -507,11 +629,14 @@ def _launch_setup(context, *args, **kwargs):
             "helpers_count": len(helpers),
             "detach_action_count": len(startup_detach_actions),
             "arm_joint_count": len(_ARM_JOINTS),
+            "cs612_2_move_group": True,
             "main_joint_state_bridge": False,
             "main_trajectory_bridge": False,
             "ros2_control_spawners": [
                 "joint_state_broadcaster",
                 "joint_trajectory_controller",
+                "cs612_2_joint_state_broadcaster",
+                "cs612_2_joint_trajectory_controller",
             ],
         },
     )
@@ -538,20 +663,30 @@ def _launch_setup(context, *args, **kwargs):
     return [
         gz_launch,
         robot_state_publisher,
-        TimerAction(period=2.0, actions=[spawn_robot]),
+        cs612_2_robot_state_publisher,
+        TimerAction(period=2.0, actions=[spawn_robot, spawn_robot2]),
         TimerAction(period=4.0, actions=[gz_bridge, gz_set_pose_bridge]),
         TimerAction(
             period=5.0,
             actions=[
                 joint_state_broadcaster_spawner,
                 joint_trajectory_controller_spawner,
+            ],
+        ),
+        TimerAction(
+            period=9.0,
+            actions=[
+                cs612_2_joint_state_broadcaster_spawner,
+                cs612_2_joint_trajectory_controller_spawner,
+            ],
+        ),
+        TimerAction(
+            period=11.0,
+            actions=[
                 move_group,
+                cs612_2_move_group,
                 *helpers,
                 rviz,
-                # 次序：锚定 → joint_states → RSP（避免订阅晚于首轮关节消息）
-                *static_world_tfs,
-                *static_arm_joint_publishers,
-                *static_robot_state_publishers,
             ],
         ),
         TimerAction(period=ap_delay, actions=[auto_pick_node], condition=IfCondition(auto_pick)),

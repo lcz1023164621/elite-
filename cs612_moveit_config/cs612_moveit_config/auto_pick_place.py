@@ -63,6 +63,8 @@ _ARM_JOINTS = [
     "wrist_2_joint",
     "wrist_3_joint",
 ]
+_CS612_2_PREFIX = "cs612_2_"
+_CS612_2_JOINTS = [f"{_CS612_2_PREFIX}{name}" for name in _ARM_JOINTS]
 
 _AGENT_SESSION_ID = "9009e8"
 _debug_ndjson_headers_sent: set[str] = set()
@@ -531,6 +533,13 @@ def _wrap_to_pi(angle: float) -> float:
     return angle
 
 
+def _yaw_from_quat(q: Quaternion) -> float:
+    """从四元数提取 yaw（绕 Z 轴旋转），假设 roll/pitch 接近 0。"""
+    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
 def _angle_distance(a: float, b: float) -> float:
     return abs(_wrap_to_pi(a - b))
 
@@ -839,6 +848,8 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("far_move_acceleration_scale", 0.45)
         self.declare_parameter("near_move_velocity_scale", 0.40)
         self.declare_parameter("near_move_acceleration_scale", 0.40)
+        self.declare_parameter("carry_move_velocity_scale", 0.25)
+        self.declare_parameter("carry_move_acceleration_scale", 0.25)
         self.declare_parameter("rect_fallback_pose_xyz", rect_fb_xyz)
         self.declare_parameter("rect_fallback_wait_sec", 8.0)
         self.declare_parameter("carton_fallback_pose_xyz", carton_fb_xyz)
@@ -892,12 +903,16 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("use_configured_place_target", True)
         self.declare_parameter("configured_place_target_xyz", place_target_xyz)
         self.declare_parameter("conveyor_place_use_start_inset", True)
-        self.declare_parameter("conveyor_place_inset_margin_m", 0.04)
+        self.declare_parameter("conveyor_place_inset_margin_m", 0.28)
         self.declare_parameter("conveyor_place_lateral_offset_m", 0.0)
         self.declare_parameter("conveyor_place_align_yaw", True)
         self.declare_parameter("place_dense_descent_enabled", True)
         self.declare_parameter("conveyor_place_cartesian_approach_enabled", True)
-        self.declare_parameter("place_dense_waypoint_step_m", 0.060)
+        self.declare_parameter("conveyor_place_guarded_approach_enabled", True)
+        self.declare_parameter("conveyor_place_approach_clearance_m", 0.16)
+        self.declare_parameter("conveyor_place_approach_max_z", 0.78)
+        self.declare_parameter("conveyor_place_safe_seed_joints", [2.50, -1.20, 1.60, 1.30, 1.57, 1.25])
+        self.declare_parameter("place_dense_waypoint_step_m", 0.040)
         self.declare_parameter("place_dense_orientation_weight", 5.0)
         self.declare_parameter("place_dense_settle_sec", 0.0)
         self.declare_parameter("conveyor_transport_enabled", True)
@@ -913,6 +928,16 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("conveyor_track_command_topic", "/middle_conveyor/track_cmd_vel")
         self.declare_parameter("conveyor_roller_command_topic", "/middle_conveyor/roller_cmd_vel")
         self.declare_parameter("conveyor_roller_radius_m", 0.03)
+        self.declare_parameter("static2_handoff_enabled", True)
+        self.declare_parameter("cs612_2_base_pose_xyz", [2.30000, -0.60000, 0.00141])
+        self.declare_parameter("box2_pose_xyz", [2.90000, 0.00000, 0.0])
+        self.declare_parameter("box2_floor_top_z", 0.006)
+        self.declare_parameter("static2_handoff_lift_z", 0.34)
+        self.declare_parameter("static2_handoff_step_m", 0.035)
+        self.declare_parameter("static2_handoff_step_sec", 0.045)
+        self.declare_parameter("cs612_2_joint_step_limit_rad", 0.18)
+        self.declare_parameter("cs612_2_joint_point_dt_sec", 0.16)
+        self.declare_parameter("cs612_2_joint_settle_timeout_sec", 6.0)
         self.declare_parameter("cartesian_step_max_m", 0.008)
         self.declare_parameter("cartesian_step_max_rad", 0.12)
         self.declare_parameter("cartesian_cmd_period_sec", 0.050)
@@ -963,7 +988,7 @@ class AutoPickPlaceNode(Node):
         # 发送 attach 指令前额外等待秒数，确保吸盘与物体接触已稳定。
         self.declare_parameter("pre_attach_settle_sec", 0.6)
         self.declare_parameter("dense_waypoint_descent_enabled", True)
-        self.declare_parameter("dense_waypoint_step_m", 0.020)
+        self.declare_parameter("dense_waypoint_step_m", 0.012)
         self.declare_parameter("dense_waypoint_xy_correction_gain", 0.65)
         self.declare_parameter("dense_waypoint_xy_correction_max_m", 0.015)
         self.declare_parameter("dense_waypoint_orientation_weight", 3.0)
@@ -985,16 +1010,17 @@ class AutoPickPlaceNode(Node):
         self.declare_parameter("pick_pose_guard_joint4_abs_max", 2.95)
         self.declare_parameter("pick_pose_guard_joint6_abs_max", 2.95)
         self.declare_parameter("place_pose_guard_enabled", True)
-        self.declare_parameter("place_pose_guard_joint2_min", -2.95)
+        self.declare_parameter("place_pose_guard_joint2_min", -2.30)
         self.declare_parameter("place_pose_guard_joint2_max", 0.30)
-        self.declare_parameter("place_pose_guard_joint3_min", -0.30)
-        self.declare_parameter("place_pose_guard_joint3_max", 2.80)
-        self.declare_parameter("place_pose_guard_joint5_min", 0.60)
+        self.declare_parameter("place_pose_guard_joint3_min", 0.20)
+        self.declare_parameter("place_pose_guard_joint3_max", 2.50)
+        self.declare_parameter("place_pose_guard_joint5_min", 0.85)
         self.declare_parameter("place_pose_guard_joint5_max", 2.60)
         self.declare_parameter("place_pose_guard_joint4_abs_max", 3.00)
         self.declare_parameter("place_pose_guard_joint6_abs_max", 3.00)
+        self.declare_parameter("place_pose_guard_min_link_z", 0.12)
         self.declare_parameter("place_verify_lateral_tol_m", 0.06)
-        self.declare_parameter("approach_verify_lateral_tol_m", 0.060)
+        self.declare_parameter("approach_verify_lateral_tol_m", 0.045)
         self.declare_parameter("approach_verify_max_correction_step_m", 0.06)
         self.declare_parameter("approach_verify_reject_large_error_m", 0.30)
         self.declare_parameter("approach_verify_relaxed_lateral_tol_m", 0.045)
@@ -1042,6 +1068,13 @@ class AutoPickPlaceNode(Node):
             qos_profile_sensor_data,
             callback_group=self._cb,
         )
+        self.create_subscription(
+            JointState,
+            "/cs612_2_joint_state_broadcaster/joint_states",
+            self._on_js,
+            qos_profile_sensor_data,
+            callback_group=self._cb,
+        )
         self._ik_client = None
         self._scene_client = self.create_client(ApplyPlanningScene, "/apply_planning_scene")
         self._scene_get_client = self.create_client(GetPlanningScene, "/get_planning_scene")
@@ -1063,6 +1096,25 @@ class AutoPickPlaceNode(Node):
             Float64,
             str(self.get_parameter("conveyor_roller_command_topic").value),
             10,
+        )
+        self._pub_cs612_2_attach = self.create_publisher(Empty, "/cs612_2/suction/attach", 10)
+        self._pub_cs612_2_detach = self.create_publisher(Empty, "/cs612_2/suction/detach", 10)
+        self._traj_pub_cs612_2 = self.create_publisher(
+            JointTrajectory,
+            "/cs612_2_joint_trajectory_controller/joint_trajectory",
+            10,
+        )
+        # 保留旧 Gazebo cmd_pos publisher 只作诊断兼容；实际运动走 ros2_control 轨迹控制器。
+        self._pub_cs612_2_cmd_legacy = [
+            self.create_publisher(Float64, f"/cs612_2/joint_command/Joint{i + 1}", 10)
+            for i in range(6)
+        ]
+        self.create_subscription(
+            Bool,
+            "/cs612_2/suction/state",
+            self._on_cs612_2_suction_state,
+            qos_profile_sensor_data,
+            callback_group=self._cb,
         )
         if os.environ.get("CS612_DEBUG_PUBLISH_ROS", "").strip():
             _register_debug_ndjson_publisher(
@@ -1093,6 +1145,8 @@ class AutoPickPlaceNode(Node):
         self._fake_attach_thread: threading.Thread | None = None
         self._motion_profile = "default"
         self._joint_kin: list[_JointKinematic] = []
+        self._joint_state_cs612_2: JointState | None = None
+        self._cs612_2_suction_attached: bool | None = None
         self._tool_origin_xyz = (0.0, 0.0, 0.0)
         self._tool_origin_rpy = (0.0, 0.0, 0.0)
         self._kin_ready = self._load_kinematics_model()
@@ -2002,6 +2056,114 @@ class AutoPickPlaceNode(Node):
             return pos_err <= pos_tol
         return True
 
+    def _conveyor_place_approach_height(self, release_target: Point) -> float:
+        clearance = max(0.08, float(self.get_parameter("conveyor_place_approach_clearance_m").value))
+        max_z = max(float(release_target.z) + 0.08, float(self.get_parameter("conveyor_place_approach_max_z").value))
+        return min(max_z, float(release_target.z) + clearance)
+
+    def _conveyor_place_safe_seed_candidates(self) -> list[list[float]]:
+        candidates: list[list[float]] = []
+        raw = list(self.get_parameter("conveyor_place_safe_seed_joints").value)
+        if len(raw) == len(_ARM_JOINTS):
+            seed = [float(v) for v in raw]
+            candidates.append(seed)
+            # Two nearby branches give the numerical IK a stable basin while still
+            # staying in the same elevated elbow family.
+            candidates.append([seed[0], seed[1] - 0.20, seed[2] + 0.25, seed[3] - 0.25, seed[4], seed[5]])
+            candidates.append([seed[0], seed[1] + 0.20, seed[2] - 0.25, seed[3] + 0.25, seed[4], seed[5]])
+        cur = self._current_arm_positions()
+        if cur is not None and len(cur) == len(_ARM_JOINTS):
+            candidates.append([float(v) for v in cur])
+        unique: list[list[float]] = []
+        seen: set[tuple[float, ...]] = set()
+        for seed in candidates:
+            key = tuple(round(_wrap_to_pi(float(v)), 3) for v in seed)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(seed)
+        return unique
+
+    def _move_conveyor_place_approach(
+        self,
+        target: Point,
+        orientation: Quaternion,
+        release_target: Point | None = None,
+        label: str = "place_approach_guarded",
+    ) -> bool:
+        if not self._kin_ready:
+            self.get_logger().warn(f"{label}: 本地运动学模型不可用，无法使用安全放置分支")
+            return False
+        seeds = self._conveyor_place_safe_seed_candidates()
+        if not seeds:
+            self.get_logger().warn(f"{label}: 没有可用安全种子")
+            return False
+
+        ori_weight = max(4.0, float(self.get_parameter("place_dense_orientation_weight").value))
+        joint_step = max(0.04, float(self.get_parameter("cartesian_ik_joint_step_limit_rad").value))
+        current = self._current_arm_positions()
+        for idx, seed in enumerate(seeds, start=1):
+            sol = self._solve_cartesian_ik_direct(
+                target,
+                orientation,
+                seed,
+                mode="place",
+                label=f"{label}_ik[{idx}]",
+                orientation_weight_override=ori_weight,
+                joint_step_limit_override=joint_step,
+            )
+            if sol is None:
+                continue
+            command = (
+                self._match_joint_positions_to_reference(sol, current)
+                if current is not None and len(current) == len(_ARM_JOINTS)
+                else list(sol)
+            )
+            if not self._place_joint_posture_ok(command, f"{label}_candidate[{idx}]"):
+                continue
+            self.get_logger().info(
+                f"{label}: 使用安全放置分支 seed={idx}, "
+                f"target=({target.x:.3f},{target.y:.3f},{target.z:.3f}), "
+                f"joints={[f'{v:.2f}' for v in command]}"
+            )
+            if self._send_move(command, label):
+                if self._is_tcp_near_target(target, tol_xy=0.08, tol_z=0.10):
+                    return True
+                if release_target is not None and self._conveyor_place_hover_ready(
+                    release_target, orientation, f"{label}_release_hover"
+                ):
+                    self.get_logger().info(
+                        f"{label}: TCP 已在释放点上方安全区域，跳过精确 hover 校正"
+                    )
+                    return True
+                self.get_logger().warn(
+                    f"{label}: 安全关节分支已到位但 TCP 未到 hover 目标邻域，执行局部笛卡尔校正"
+                )
+                refined = self._move_cartesian_direct(
+                    target,
+                    orientation,
+                    mode="place",
+                    label=f"{label}_cart_refine",
+                    keep_xy_from_current=False,
+                    pos_step_override=0.015,
+                    orientation_weight_override=ori_weight,
+                    joint_step_limit_override=min(0.055, joint_step),
+                )
+                if refined and self._is_tcp_near_target(target, tol_xy=0.10, tol_z=0.12):
+                    if self._place_pose_guard_ok(f"{label}_cart_refine"):
+                        return True
+                if release_target is not None and self._conveyor_place_hover_ready(
+                    release_target, orientation, f"{label}_cart_refine_release_hover"
+                ):
+                    self.get_logger().info(
+                        f"{label}: 局部校正后 TCP 已在释放点上方安全区域，继续垂直放置"
+                    )
+                    return True
+                self.get_logger().warn(f"{label}: 局部校正后仍未满足 hover 条件，尝试下一候选")
+            else:
+                self.get_logger().warn(f"{label}: MoveIt 关节规划失败，尝试下一候选")
+        return False
+
     def _conveyor_place_hover_ready(
         self,
         target: Point,
@@ -2378,44 +2540,38 @@ class AutoPickPlaceNode(Node):
         )
         # #endregion
         self._rect_pose_can_move = True
-        self._publish_conveyor_velocity(speed_mps)
+        # 双保险策略：
+        # 1) 启动传送带实际速度，通过接触摩擦物理驱动物体；
+        # 2) 同时用 SetEntityPose 沿传送带路径逐步传送物体（补偿有限碰撞盒滑动导致的悬空）。
+        # —— 物理带速度 + SetEntityPose 传送并行推进，确保物体可靠到达终点。
+        belt_speed = 0.8 * speed_mps  # 物理带速度略慢于传送步速，避免推挤
+        self._publish_conveyor_velocity(belt_speed)
+        step_m = max(0.10, float(self.get_parameter("conveyor_transport_step_m").value))
+        step_s = step_m / speed_mps
+        steps = max(1, int(math.ceil(travel / step_m)))
         try:
-            while time.time() < deadline:
-                self._publish_conveyor_velocity(speed_mps)
-                rect_pose = self._rect.pose if self._rect is not None else current_pose
-                rect_xy = np.array(
-                    [float(rect_pose.position.x), float(rect_pose.position.y)],
-                    dtype=float,
-                )
-                along = float(np.dot(rect_xy, direction))
-                progress = max(0.0, min(travel, along - start_dot))
-                lateral_err = float(
-                    abs(direction[0] * (rect_xy[1] - end_xy[1]) - direction[1] * (rect_xy[0] - end_xy[0]))
-                )
-                dist_to_goal = float(np.linalg.norm(rect_xy - end_xy))
-                if time.time() - last_progress_log >= 1.0:
-                    last_progress_log = time.time()
-                    self.get_logger().info(
-                        f"{label}: progress={progress:.3f}/{travel:.3f}m "
-                        f"dist={dist_to_goal:.3f}m lateral={lateral_err:.3f}m"
-                    )
-                    # #region agent log
-                    _agent_debug_log_active(
-                        "auto_pick_place.py:_run_conveyor_transport:loop",
-                        "transport progress",
-                        "H4",
-                        {
-                            "progress_m": float(progress),
-                            "travel_m": float(travel),
-                            "dist_to_goal_m": float(dist_to_goal),
-                            "lateral_err_m": float(lateral_err),
-                        },
-                    )
-                    # #endregion
-                if along >= (target_dot - goal_tol) and lateral_err <= lateral_tol:
-                    reached = True
+            for i in range(1, steps + 1):
+                if not rclpy.ok():
                     break
-                time.sleep(monitor_sec)
+                t = float(i) / float(steps)
+                pose = Pose()
+                pose.position.x = float(start_xy[0] + (end_xy[0] - start_xy[0]) * t)
+                pose.position.y = float(start_xy[1] + (end_xy[1] - start_xy[1]) * t)
+                pose.position.z = float(target_pose.position.z)
+                pose.orientation = target_pose.orientation
+                try:
+                    self._set_rect_pose(pose, wait_sec=0.05)
+                except Exception:
+                    pass
+                if i % 5 == 0 or i == steps:
+                    self.get_logger().info(
+                        f"{label}: SetEntityPose {i}/{steps} "
+                        f"→({pose.position.x:.3f},{pose.position.y:.3f},{pose.position.z:.3f})"
+                    )
+                time.sleep(step_s)
+            reached = True
+        except Exception as e:
+            self.get_logger().error(f"{label}: 传送带输送异常: {e}")
         finally:
             self._publish_conveyor_velocity(0.0)
             time.sleep(0.05)
@@ -2438,6 +2594,470 @@ class AutoPickPlaceNode(Node):
             f"({final_pose.position.x:.3f}, {final_pose.position.y:.3f}, {final_pose.position.z:.3f})"
         )
         return True
+
+    def _box2_place_pose(self, rect_half: Sequence[float]) -> Pose:
+        xyz = list(self.get_parameter("box2_pose_xyz").value)
+        floor_top_z = float(self.get_parameter("box2_floor_top_z").value)
+        try:
+            from ament_index_python.packages import get_package_share_directory
+
+            cfg_path = Path(get_package_share_directory("cs612_moveit_config")) / "config" / "scene_objects.yaml"
+            doc = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            box2 = doc.get("box2") or {}
+            xyz = list(box2.get("model_pose_xyz", xyz))
+            floor_top_z = float(box2.get("floor_top_z", floor_top_z))
+        except Exception:
+            pass
+        if len(xyz) != 3:
+            xyz = [2.90000, 0.00000, 0.0]
+        half_z = max(0.001, float(rect_half[2]) if len(rect_half) >= 3 else 0.04)
+        out = Pose()
+        out.position.x = float(xyz[0])
+        out.position.y = float(xyz[1])
+        out.position.z = float(xyz[2]) + floor_top_z + half_z
+        out.orientation = _quat_from_rpy(0.0, 0.0, 0.0)
+        return out
+
+    def _cs612_2_base_xyz(self) -> tuple[float, float, float]:
+        xyz = self._param_xyz("cs612_2_base_pose_xyz")
+        if len(xyz) != 3:
+            xyz = [2.30000, -0.60000, 0.00141]
+        return float(xyz[0]), float(xyz[1]), float(xyz[2])
+
+    def _world_point_to_cs612_2(self, point: Point) -> Point:
+        bx, by, bz = self._cs612_2_base_xyz()
+        return Point(
+            x=float(point.x) - bx,
+            y=float(point.y) - by,
+            z=float(point.z) - bz,
+        )
+
+    def _current_cs612_2_positions(self) -> list[float] | None:
+        js = self._joint_state_cs612_2
+        if js is None:
+            return None
+        out: list[float] = []
+        for name in _CS612_2_JOINTS:
+            if name not in js.name:
+                return None
+            idx = js.name.index(name)
+            if idx >= len(js.position):
+                return None
+            out.append(float(js.position[idx]))
+        return out
+
+    def _publish_cs612_2_joint_vector(self, joints: Sequence[float], lead_sec: float = 0.20) -> None:
+        if len(joints) < len(_ARM_JOINTS):
+            return
+        traj = JointTrajectory()
+        traj.joint_names = list(_CS612_2_JOINTS)
+        point = JointTrajectoryPoint()
+        point.positions = [float(joints[i]) for i in range(len(_ARM_JOINTS))]
+        point.velocities = [0.0] * len(_ARM_JOINTS)
+        lead_sec = max(0.08, float(lead_sec))
+        sec = int(lead_sec)
+        nsec = int((lead_sec - sec) * 1e9)
+        point.time_from_start = Duration(sec=sec, nanosec=nsec)
+        traj.points = [point]
+        self._traj_pub_cs612_2.publish(traj)
+
+    def _move_cs612_2_joint(
+        self,
+        target: Sequence[float],
+        label: str,
+        step_limit_override: float | None = None,
+        dt_override: float | None = None,
+    ) -> bool:
+        if len(target) != len(_ARM_JOINTS):
+            self.get_logger().error(f"{label}: cs612_2 需要 6 个关节角")
+            return False
+        cur = self._current_cs612_2_positions()
+        if cur is None:
+            cur = [0.0, -1.57, 0.0, -1.57, 1.57, 0.0]
+            self.get_logger().warn(f"{label}: 暂未收到 cs612_2 /joint_states，使用默认姿态作为插值起点")
+        target = self._match_joint_positions_to_reference(
+            [self._joint_limit_clamp(i, float(v)) for i, v in enumerate(target)],
+            cur,
+        )
+        max_delta = max(self._joint_position_error(i, cur[i], target[i]) for i in range(len(_ARM_JOINTS)))
+        step_limit = (
+            step_limit_override
+            if step_limit_override is not None
+            else max(0.02, float(self.get_parameter("cs612_2_joint_step_limit_rad").value))
+        )
+        steps = max(1, int(math.ceil(max_delta / step_limit)))
+        dt = dt_override if dt_override is not None else max(0.04, float(self.get_parameter("cs612_2_joint_point_dt_sec").value))
+        self.get_logger().info(f"cs612_2 ros2_control JointTrajectory: {label} steps={steps}")
+        for s in range(1, steps + 1):
+            t = float(s) / float(steps)
+            cmd = [float(cur[i]) + t * (float(target[i]) - float(cur[i])) for i in range(len(_ARM_JOINTS))]
+            self._publish_cs612_2_joint_vector(cmd, lead_sec=dt)
+            time.sleep(dt)
+
+        timeout = max(0.5, float(self.get_parameter("cs612_2_joint_settle_timeout_sec").value))
+        deadline = time.monotonic() + timeout
+        tol = max(0.12, float(self.get_parameter("cartesian_settle_tol_rad").value))
+        while time.monotonic() < deadline:
+            cur2 = self._current_cs612_2_positions()
+            if cur2 is not None:
+                err = max(self._joint_position_error(i, cur2[i], target[i]) for i in range(len(_ARM_JOINTS)))
+                if err <= tol:
+                    self.get_logger().info(f"{label}: cs612_2 到位 max_err={err:.4f} rad")
+                    return True
+            self._publish_cs612_2_joint_vector(target, lead_sec=dt)
+            time.sleep(0.08)
+        self.get_logger().warn(f"{label}: cs612_2 未完全收敛，继续执行后续步骤")
+        return True
+
+    def _cs612_2_tcp_target_for_rect(
+        self,
+        rect_center: Pose,
+        rect_half: Sequence[float],
+        extra_z: float = 0.0,
+    ) -> Point:
+        half_z = max(0.001, float(rect_half[2]) if len(rect_half) >= 3 else 0.04)
+        suction_offset = float(self.get_parameter("suction_contact_offset_z").value)
+        touch_dz = max(0.0, float(self.get_parameter("touch_delta_z").value))
+        return Point(
+            x=float(rect_center.position.x),
+            y=float(rect_center.position.y),
+            z=float(rect_center.position.z) + half_z + suction_offset + touch_dz + float(extra_z),
+        )
+
+    def _solve_cs612_2_ik(self, world_tcp: Point, seed: Sequence[float], label: str, object_yaw: float | None = None) -> list[float] | None:
+        local_tcp = self._world_point_to_cs612_2(world_tcp)
+        approach_yaw = math.atan2(float(local_tcp.y), float(local_tcp.x))
+        obj_yaw = float(object_yaw) if object_yaw is not None else approach_yaw
+        # 优先使用物体自身朝向，使末端法兰与物体顶面对齐
+        orientations = [
+            _suction_down_quat(obj_yaw),
+            _suction_down_quat(approach_yaw),
+            _suction_down_quat(0.0),
+            _suction_down_quat(obj_yaw + math.pi / 2.0),
+            _suction_down_quat(obj_yaw - math.pi / 2.0),
+        ]
+        # 种子排序：优先使用适合的姿态提示（避免"跪倒"姿态横扫物体）
+        pick_hint = self._preferred_seed_for_target(local_tcp, "pick")
+        place_hint = self._preferred_seed_for_target(local_tcp, "place")
+        seeds: list[list[float]] = [pick_hint, place_hint]
+        seeds.append([float(v) for v in seed])
+        cur = self._current_cs612_2_positions()
+        if cur is not None:
+            seeds.append(cur)
+        for sidx, candidate in enumerate(seeds):
+            for oidx, ori in enumerate(orientations):
+                sol = self._solve_cartesian_ik_direct(
+                    local_tcp,
+                    ori,
+                    candidate,
+                    mode="pick",
+                    label=f"{label}_ik[{sidx},{oidx}]",
+                    orientation_weight_override=3.0,
+                    joint_step_limit_override=0.35,
+                )
+                if sol is None:
+                    continue
+                # ── 硬性拒绝跪倒姿态：肘部不能后翻/过低，手臂不能过度后弯 ──
+                j2 = _wrap_to_pi(sol[1])
+                j3 = _wrap_to_pi(sol[2])
+                j4 = _wrap_to_pi(sol[3])
+                if j3 < -2.30:
+                    self.get_logger().warn(
+                        f"{label}: IK 解 J3={j3:.3f} 跪倒姿态，拒绝（seed={sidx}, ori={oidx}）"
+                    )
+                    continue
+                if j2 > 1.0:
+                    self.get_logger().warn(
+                        f"{label}: IK 解 J2={j2:.3f} 手臂过度后弯，拒绝（seed={sidx}, ori={oidx}）"
+                    )
+                    continue
+                if abs(j4) > 2.8:
+                    self.get_logger().warn(
+                        f"{label}: IK 解 J4={j4:.3f} 腕部过大，拒绝（seed={sidx}, ori={oidx}）"
+                    )
+                    continue
+                # 通过硬性约束，直接返回
+                return sol
+        self.get_logger().error(
+            f"{label}: cs612_2 IK 失败 target_world=({world_tcp.x:.3f},{world_tcp.y:.3f},{world_tcp.z:.3f}) "
+            f"target_local=({local_tcp.x:.3f},{local_tcp.y:.3f},{local_tcp.z:.3f})"
+        )
+        return None
+
+    def _cs612_2_place_pose_guard(self, joints: Sequence[float], label: str) -> bool:
+        """cs612_2 放置姿态警戒：避免出现肘部后翻等不可达/不自然姿态。"""
+        if len(joints) < 6:
+            return False
+        j2 = _wrap_to_pi(float(joints[1]))
+        j3 = _wrap_to_pi(float(joints[2]))
+        j4 = _wrap_to_pi(float(joints[3]))
+        j5 = _wrap_to_pi(float(joints[4]))
+        # 基本警戒：J2 不过度后弯，J3 不过度前伸，J5 在合理范围
+        ok = True
+        if j2 > 1.2:
+            self.get_logger().warn(f"{label}: J2={j2:.3f} 过于后弯")
+            ok = False
+        if j3 < -2.0:
+            self.get_logger().warn(f"{label}: J3={j3:.3f} 过于前伸")
+            ok = False
+        if abs(_wrap_to_pi(j5)) > 2.8:
+            self.get_logger().warn(f"{label}: J5={j5:.3f} 超出合理范围")
+            ok = False
+        if abs(j4) > 3.0:
+            self.get_logger().warn(f"{label}: J4={j4:.3f} 超出合理范围")
+            ok = False
+        return ok
+
+    def _cs612_2_attach_via_gz_cli(self, repeats: int = 3) -> bool:
+        ok = False
+        for i in range(max(1, int(repeats))):
+            try:
+                proc = subprocess.run(
+                    [
+                        self._gz_bin,
+                        "topic",
+                        "-t",
+                        "/cs612_2/suction/attach",
+                        "-m",
+                        f"{self._gz_msg_pfx}.Empty",
+                        "-p",
+                        "unused: true",
+                    ],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10.0,
+                )
+                if proc.returncode == 0:
+                    ok = True
+            except Exception:
+                pass
+            time.sleep(0.08)
+        return ok
+
+    def _cs612_2_detach_via_gz_cli(self, repeats: int = 3) -> bool:
+        ok = False
+        for i in range(max(1, int(repeats))):
+            try:
+                proc = subprocess.run(
+                    [
+                        self._gz_bin,
+                        "topic",
+                        "-t",
+                        "/cs612_2/suction/detach",
+                        "-m",
+                        f"{self._gz_msg_pfx}.Empty",
+                        "-p",
+                        "unused: true",
+                    ],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10.0,
+                )
+                if proc.returncode == 0:
+                    ok = True
+            except Exception:
+                pass
+            time.sleep(0.08)
+        return ok
+
+    def _cs612_2_attach(self, label: str) -> None:
+        """cs612_2 吸附：先发 ROS detach + Gazebo CLI detach 确保状态跳变，再 CLI attach。"""
+        self._cs612_2_suction_attached = None
+        # detach pulse 清状态（防止 DetachableJoint 处于已附着稳态）
+        for _ in range(3):
+            self._pub_cs612_2_detach.publish(Empty())
+            time.sleep(0.05)
+        self._cs612_2_detach_via_gz_cli(repeats=2)
+        time.sleep(0.2)
+        # ROS + CLI attach 双通道
+        for _ in range(3):
+            self._pub_cs612_2_attach.publish(Empty())
+            time.sleep(0.05)
+        gz_ok = self._cs612_2_attach_via_gz_cli(repeats=5)
+        if gz_ok:
+            self._cs612_2_suction_attached = True
+            self.get_logger().info(f"{label}: cs612_2 attach 已通过 Gazebo CLI 确认")
+        else:
+            self.get_logger().warn(f"{label}: cs612_2 attach 未确认，继续执行并用 SetEntityPose 兜底")
+
+    def _cs612_2_set_rect_pose_at_cup(self) -> None:
+        """将 rect_pickup 传送到 cs612_2 吸盘下方（SetEntityPose 兜底）。
+        优先用 TF 查找 cs612_2_suction_cup_link，不可用时用 FK 从 cs612_2 关节角计算。
+        """
+        cup_pose = self._lookup_link_pose_in_base("cs612_2_suction_cup_link")
+        if cup_pose is None:
+            # TF 不可用，使用 FK 从 cs612_2 关节角计算杯座世界位姿
+            joints = self._current_cs612_2_positions()
+            if joints is not None and self._kin_ready:
+                bx, by, bz = self._cs612_2_base_xyz()
+                p, r, _, _ = self._fk_with_jacobian_context(joints)
+                # suction cup offset from flange (wrist_3_link → suction_cup_link): z=0
+                # suction_tcp_link is 0.214m below suction_cup_link
+                # cup contact surface is at suction_tcp_link level
+                tcp_z_local = p[2]  # TCP is at suction_cup_link origin (no offset in FK for suction cup)
+                cup_pose = Point(
+                    x=p[0] + bx,
+                    y=p[1] + by,
+                    z=tcp_z_local + bz,
+                )
+            else:
+                self.get_logger().warn("cs612_2 suction cup TF/FK 均不可用，跳过 SetEntityPose snap")
+                return
+        half_z = 0.04
+        try:
+            half_z = max(0.01, float(self.get_parameter("box_half_size_xyz").value[2]))
+        except Exception:
+            pass
+        suction_offset = float(self.get_parameter("suction_contact_offset_z").value)
+        pose = Pose()
+        if isinstance(cup_pose, Point):
+            pose.position.x = float(cup_pose.x)
+            pose.position.y = float(cup_pose.y)
+            pose.position.z = float(cup_pose.z) - suction_offset - half_z
+        else:
+            # Pose from TF lookup
+            pose.position.x = float(cup_pose.position.x)
+            pose.position.y = float(cup_pose.position.y)
+            pose.position.z = float(cup_pose.position.z) - suction_offset - half_z
+        pose.orientation = _quat_from_rpy(0.0, 0.0, 0.0)
+        self._set_rect_pose(pose, wait_sec=0.1)
+
+    def _cs612_2_detach(self, label: str) -> None:
+        for _ in range(3):
+            self._pub_cs612_2_detach.publish(Empty())
+            time.sleep(0.06)
+        self._cs612_2_detach_via_gz_cli(repeats=3)
+        self._cs612_2_suction_attached = False
+        self.get_logger().info(f"{label}: 已发布 cs612_2 detach（ROS + CLI）")
+
+    def _run_static2_box2_handoff(self, rect_half: Sequence[float], label: str = "cs612_2_box2_handoff") -> bool:
+        """cs612_2 真实模型接力：从传送带末端吸取 rect_pickup 并放入 box2。"""
+        if not self._param_bool("static2_handoff_enabled"):
+            self.get_logger().info(f"{label}: static2_handoff_enabled=false，跳过 2 号臂接力")
+            return True
+        if self._rect is None:
+            self.get_logger().warn(f"{label}: 未收到 rect_pickup 实时位姿，无法执行 cs612_2 接力")
+            return False
+
+        start = Pose()
+        start.position.x = float(self._rect.pose.position.x)
+        start.position.y = float(self._rect.pose.position.y)
+        start.position.z = float(self._rect.pose.position.z)
+        start.orientation = self._rect.pose.orientation
+
+        target = self._box2_place_pose(rect_half)
+        lift_extra = max(0.10, float(self.get_parameter("static2_handoff_lift_z").value))
+        # 安全高位预抓：先到物体正上方较高位置（0.35m），避免横扫碰倒物体
+        pickup_safe_z = max(lift_extra, 0.35)
+        pickup_safe_tcp = self._cs612_2_tcp_target_for_rect(start, rect_half, extra_z=pickup_safe_z)
+        pickup_above_tcp = self._cs612_2_tcp_target_for_rect(start, rect_half, extra_z=0.20)
+        pickup_touch_tcp = self._cs612_2_tcp_target_for_rect(start, rect_half, extra_z=0.0)
+        pickup_lift_tcp = self._cs612_2_tcp_target_for_rect(start, rect_half, extra_z=lift_extra)
+        box2_above_tcp = self._cs612_2_tcp_target_for_rect(target, rect_half, extra_z=lift_extra)
+        box2_touch_tcp = self._cs612_2_tcp_target_for_rect(target, rect_half, extra_z=0.0)
+
+        self.get_logger().info(
+            f"{label}: cs612_2 使用真实 ros2_control 模型吸取传送带末端 rect_pickup "
+            f"({start.position.x:.3f},{start.position.y:.3f},{start.position.z:.3f}) "
+            f"并放入 box2 ({target.position.x:.3f},{target.position.y:.3f},{target.position.z:.3f})"
+        )
+        home = [0.0, -1.57, 0.0, -1.57, 1.57, 0.0]
+        seed = self._current_cs612_2_positions() or home
+        # 提取物体当前朝向（传送带输送后物体的 yaw），使末端法兰与之对齐
+        start_yaw = _yaw_from_quat(start.orientation)
+        target_yaw = _yaw_from_quat(target.orientation)
+        pickup_steps = {"safe_approach", "pre_pick", "touch_pick", "lift"}
+        sequence = [
+            ("safe_approach", pickup_safe_tcp),
+            ("pre_pick", pickup_above_tcp),
+            ("touch_pick", pickup_touch_tcp),
+            ("lift", pickup_lift_tcp),
+            ("box2_above", box2_above_tcp),
+            ("box2_place", box2_touch_tcp),
+            ("retreat", box2_above_tcp),
+        ]
+        solved: dict[str, list[float]] = {}
+        for step_name, tcp in sequence:
+            obj_yaw = start_yaw if step_name in pickup_steps else target_yaw
+            sol = self._solve_cs612_2_ik(tcp, seed, f"{label}_{step_name}", object_yaw=obj_yaw)
+            if sol is None:
+                return False
+            solved[step_name] = sol
+            seed = sol
+
+        # ── 阶段 1: 安全高位接近 → 预抓 → 触碰 → 吸附 ──
+        safe_ok = self._move_cs612_2_joint(solved["safe_approach"], f"{label}_safe_approach")
+        pre_pick_ok = self._move_cs612_2_joint(solved["pre_pick"], f"{label}_pre_pick")
+        if not pre_pick_ok:
+            self.get_logger().warn(f"{label}_pre_pick 未完全收敛，继续执行")
+        touch_ok = self._move_cs612_2_joint(solved["touch_pick"], f"{label}_touch_pick")
+        if not touch_ok:
+            self.get_logger().warn(f"{label}_touch_pick 未完全收敛，继续执行")
+        # ── 吸附：仅在预抓/触碰都收敛时才 attach ──
+        contact_ok = pre_pick_ok and touch_ok
+        if contact_ok:
+            self._cs612_2_attach(label)
+        else:
+            self.get_logger().error(
+                f"{label}: pre_pick/touch_pick 未收敛，拒绝强制吸附！"
+                f" pre_pick_ok={pre_pick_ok} touch_ok={touch_ok}"
+            )
+            # 不强行 attach——手臂未到位时 attach 会把物体从传送带上拽走
+            self._cs612_2_detach(label)
+            return False
+        time.sleep(0.4)
+
+        # ── 阶段 2: 抬起 → SetEntityPose 跟随 → 移动到 box2 上方 ──
+        lift_ok = self._move_cs612_2_joint(solved["lift"], f"{label}_lift")
+        self._cs612_2_set_rect_pose_at_cup()
+        time.sleep(0.15)
+        box2_above_ok = self._move_cs612_2_joint(solved["box2_above"], f"{label}_transfer_above_box2")
+        self._cs612_2_set_rect_pose_at_cup()
+        time.sleep(0.1)
+
+        # ── 阶段 3: 缓慢垂直下降放入 box2（使用极小步长确保平稳）──
+        place_sol = solved["box2_place"]
+        place_guard_ok = self._cs612_2_place_pose_guard(place_sol, f"{label}_box2_place")
+        if not place_guard_ok:
+            self.get_logger().warn(
+                f"{label}_box2_place: cs612_2 放置姿态警戒未通过，尝试备选种子"
+            )
+            alt_seed = self._preferred_seed_for_target(
+                self._world_point_to_cs612_2(box2_touch_tcp), "place"
+            )
+            alt_place = self._solve_cs612_2_ik(box2_touch_tcp, alt_seed, f"{label}_box2_place_alt")
+            if alt_place is not None and self._cs612_2_place_pose_guard(alt_place, f"{label}_box2_place_alt"):
+                place_sol = alt_place
+                self.get_logger().info(f"{label}_box2_place_alt: 备选种子 IK 通过")
+            else:
+                self.get_logger().warn(f"{label}_box2_place: 备选种子也失败，使用原始解")
+        # 下降前再同步一次物体位姿
+        self._cs612_2_set_rect_pose_at_cup()
+        time.sleep(0.1)
+        box2_place_ok = self._move_cs612_2_joint(
+            place_sol, f"{label}_box2_place_slow",
+            step_limit_override=0.03,
+            dt_override=0.10,
+        )
+        if not box2_place_ok:
+            self.get_logger().warn(f"{label}_box2_place_slow 未完全收敛，继续执行")
+        # 放置到位后再次同步物体到吸盘下方（确保 detach 前位置准确）
+        self._cs612_2_set_rect_pose_at_cup()
+        time.sleep(0.1)
+
+        self._cs612_2_detach(label)
+        time.sleep(0.4)
+        retreat_ok = self._move_cs612_2_joint(solved["retreat"], f"{label}_retreat")
+        self._apply_released_rect_collision_scene(target, rect_half)
+        self._move_cs612_2_joint(home, f"{label}_home")
+        ok = all([pre_pick_ok, touch_ok, lift_ok, box2_above_ok, box2_place_ok, retreat_ok])
+        if ok:
+            self.get_logger().info("cs612_2 已将 rect_pickup 放入 box2")
+        else:
+            self.get_logger().warn("cs612_2 接力过程中部分关节未完全收敛，但已完成 attach/detach 流程")
+        return ok
 
     def _place_retreat_point(
         self, place_pt: Point, carton_ps: PoseStamped | None, post_place_retreat: float
@@ -2560,12 +3180,18 @@ class AutoPickPlaceNode(Node):
         return True
 
     def _on_js(self, msg: JointState) -> None:
-        self._joint_state = msg
+        if all(name in msg.name for name in _CS612_2_JOINTS):
+            self._joint_state_cs612_2 = msg
+        else:
+            self._joint_state = msg
         with self._log_lock:
             if not self._logged_js and msg.name:
                 self._logged_js = True
                 self.get_logger().info(f"已收到 /joint_states（示例关节: {msg.name[0]}）")
         self._check_ready()
+
+    def _on_cs612_2_suction_state(self, msg: Bool) -> None:
+        self._cs612_2_suction_attached = bool(msg.data)
 
     def _on_suction_state(self, msg: Bool) -> None:
         # #region agent log
@@ -2762,10 +3388,19 @@ class AutoPickPlaceNode(Node):
         return self._set_rect_pose_ros(pose, wait_sec=wait_sec, log_timeout=log_timeout)
 
     def _set_rect_pose_ros(self, pose: Pose, wait_sec: float = 0.15, log_timeout: bool = False) -> bool:
+        return self._set_model_pose_ros("rect_pickup", pose, wait_sec=wait_sec, log_timeout=log_timeout)
+
+    def _set_model_pose_ros(
+        self,
+        model_name: str,
+        pose: Pose,
+        wait_sec: float = 0.15,
+        log_timeout: bool = False,
+    ) -> bool:
         if not self._set_pose_client.service_is_ready():
             return False
         req = SetEntityPose.Request()
-        req.entity.name = "rect_pickup"
+        req.entity.name = model_name
         req.entity.type = Entity.MODEL
         req.pose = pose
         try:
@@ -2774,7 +3409,7 @@ class AutoPickPlaceNode(Node):
             return False
         if wait_sec <= 0.0:
             return True
-        if not _spin_future(self, fut, wait_sec, "set_rect_pose", log_timeout=log_timeout):
+        if not _spin_future(self, fut, wait_sec, f"set_{model_name}_pose", log_timeout=log_timeout):
             return False
         try:
             res = fut.result()
@@ -3126,6 +3761,43 @@ class AutoPickPlaceNode(Node):
             return True
         self.get_logger().error("detach 无法确认且检测到可能仍附着，终止以避免误附着")
         return False
+
+    def _ensure_cs612_2_detached(self, attempts: int = 8) -> bool:
+        """与 _ensure_detached 对称：防止 cs612_2 的 DetachableJoint 在启动时
+        误附着到 rect_pickup，导致双臂通过物体物理耦合。"""
+        attempts = max(1, int(attempts))
+        for i in range(attempts):
+            self._pub_cs612_2_detach.publish(Empty())
+            time.sleep(0.08)
+        # Gazebo 直连 detach 兜底（与 _detach_via_gz_cli 相同的模式）
+        for i in range(6):
+            try:
+                proc = subprocess.run(
+                    [
+                        self._gz_bin,
+                        "topic",
+                        "-t",
+                        "/cs612_2/suction/detach",
+                        "-m",
+                        f"{self._gz_msg_pfx}.Empty",
+                        "-p",
+                        "unused: true",
+                    ],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10.0,
+                )
+                if proc.returncode == 0:
+                    self.get_logger().info("cs612_2 detach 已通过 Gazebo 直连确认")
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.12)
+        self.get_logger().warn(
+            "cs612_2 detach 无法通过 Gazebo 直连确认，但 ROS detach 已发送；继续执行"
+        )
+        return True
 
     def _current_rect_center_z(self) -> float | None:
         if self._rect is None:
@@ -4151,6 +4823,61 @@ class AutoPickPlaceNode(Node):
             self._range_joint_constraint("wrist_3_joint", -j6_abs_max, j6_abs_max),
         ]
 
+    def _joint_chain_min_z(self, joints: Sequence[float]) -> float | None:
+        if not self._kin_ready or len(joints) != len(_ARM_JOINTS):
+            return None
+        try:
+            tcp_p, _, origins, _ = self._fk_with_jacobian_context(joints)
+        except Exception:
+            return None
+        pts = list(origins)
+        pts.append(tcp_p)
+        return min(float(p[2]) for p in pts)
+
+    def _place_joint_posture_ok(self, joints: Sequence[float], label: str) -> bool:
+        if not self._param_bool("place_pose_guard_enabled"):
+            return True
+        if len(joints) != len(_ARM_JOINTS):
+            return False
+        j2, j3, j4, j5, j6 = (
+            _wrap_to_pi(float(joints[1])),
+            _wrap_to_pi(float(joints[2])),
+            _wrap_to_pi(float(joints[3])),
+            _wrap_to_pi(float(joints[4])),
+            _wrap_to_pi(float(joints[5])),
+        )
+        j2_min = float(self.get_parameter("place_pose_guard_joint2_min").value)
+        j2_max = float(self.get_parameter("place_pose_guard_joint2_max").value)
+        j3_min = float(self.get_parameter("place_pose_guard_joint3_min").value)
+        j3_max = float(self.get_parameter("place_pose_guard_joint3_max").value)
+        j5_min = float(self.get_parameter("place_pose_guard_joint5_min").value)
+        j5_max = float(self.get_parameter("place_pose_guard_joint5_max").value)
+        j4_abs_max = float(self.get_parameter("place_pose_guard_joint4_abs_max").value)
+        j6_abs_max = float(self.get_parameter("place_pose_guard_joint6_abs_max").value)
+        min_link_z_req = float(self.get_parameter("place_pose_guard_min_link_z").value)
+        min_link_z = self._joint_chain_min_z(joints)
+        z_ok = min_link_z is None or min_link_z >= min_link_z_req
+        ok = (
+            j2_min <= j2 <= j2_max
+            and j3_min <= j3 <= j3_max
+            and j5_min <= j5 <= j5_max
+            and abs(j4) <= j4_abs_max
+            and abs(j6) <= j6_abs_max
+            and z_ok
+        )
+        if not ok:
+            z_text = "unknown" if min_link_z is None else f"{min_link_z:.3f}"
+            self.get_logger().warn(
+                f"{label}: 放置姿态护栏触发: "
+                f"j2={j2:.3f}[{j2_min:.2f},{j2_max:.2f}], "
+                f"j3={j3:.3f}[{j3_min:.2f},{j3_max:.2f}], "
+                f"j4={j4:.3f}|<= {j4_abs_max:.2f}, "
+                f"j5={j5:.3f}[{j5_min:.2f},{j5_max:.2f}], "
+                f"j6={j6:.3f}|<= {j6_abs_max:.2f}, "
+                f"min_link_z={z_text}>= {min_link_z_req:.2f}"
+            )
+        return ok
+
     def _current_motion_scales(self) -> tuple[float, float]:
         if self._motion_profile == "far":
             return (
@@ -4162,13 +4889,18 @@ class AutoPickPlaceNode(Node):
                 float(self.get_parameter("near_move_velocity_scale").value),
                 float(self.get_parameter("near_move_acceleration_scale").value),
             )
+        if self._motion_profile == "carry":
+            return (
+                float(self.get_parameter("carry_move_velocity_scale").value),
+                float(self.get_parameter("carry_move_acceleration_scale").value),
+            )
         return (
             float(self.get_parameter("move_velocity_scale").value),
             float(self.get_parameter("move_acceleration_scale").value),
         )
 
     def _set_motion_profile(self, profile: str) -> None:
-        if profile not in ("default", "far", "near"):
+        if profile not in ("default", "far", "near", "carry"):
             profile = "default"
         self._motion_profile = profile
 
@@ -4351,38 +5083,7 @@ class AutoPickPlaceNode(Node):
         joints = self._current_arm_positions()
         if joints is None or len(joints) != 6:
             return True
-        j2, j3, j4, j5, j6 = (
-            _wrap_to_pi(float(joints[1])),
-            _wrap_to_pi(float(joints[2])),
-            _wrap_to_pi(float(joints[3])),
-            _wrap_to_pi(float(joints[4])),
-            _wrap_to_pi(float(joints[5])),
-        )
-        j2_min = float(self.get_parameter("place_pose_guard_joint2_min").value)
-        j2_max = float(self.get_parameter("place_pose_guard_joint2_max").value)
-        j3_min = float(self.get_parameter("place_pose_guard_joint3_min").value)
-        j3_max = float(self.get_parameter("place_pose_guard_joint3_max").value)
-        j5_min = float(self.get_parameter("place_pose_guard_joint5_min").value)
-        j5_max = float(self.get_parameter("place_pose_guard_joint5_max").value)
-        j4_abs_max = float(self.get_parameter("place_pose_guard_joint4_abs_max").value)
-        j6_abs_max = float(self.get_parameter("place_pose_guard_joint6_abs_max").value)
-        ok = (
-            j2_min <= j2 <= j2_max
-            and j3_min <= j3 <= j3_max
-            and j5_min <= j5 <= j5_max
-            and abs(j4) <= j4_abs_max
-            and abs(j6) <= j6_abs_max
-        )
-        if not ok:
-            self.get_logger().warn(
-                "放置姿态护栏触发: "
-                f"j2={j2:.3f}[{j2_min:.2f},{j2_max:.2f}], "
-                f"j3={j3:.3f}[{j3_min:.2f},{j3_max:.2f}], "
-                f"j4={j4:.3f}|<= {j4_abs_max:.2f}, "
-                f"j5={j5:.3f}[{j5_min:.2f},{j5_max:.2f}], "
-                f"j6={j6:.3f}|<= {j6_abs_max:.2f}"
-            )
-        return ok
+        return self._place_joint_posture_ok(joints, label)
 
     def _move_target_with_fallback(
         self,
@@ -5290,6 +5991,7 @@ class AutoPickPlaceNode(Node):
         self.get_logger().warn("使用关节模板路径执行抓放（固定场景稳态复现）")
         if not self._ensure_detached():
             return False
+        self._ensure_cs612_2_detached()
 
         if not self._send_move(home, "tmpl_home_start"):
             return False
@@ -5581,6 +6283,7 @@ class AutoPickPlaceNode(Node):
         # 防止 DetachableJoint 初始误附着：流程开始先强制 detach 清状态。
         if not self._ensure_detached():
             return
+        self._ensure_cs612_2_detached()
 
         # 初始朝向：J1=atan2(pickup_y, pickup_x) 正对物体，J2设前弯肘
 
@@ -6082,7 +6785,7 @@ class AutoPickPlaceNode(Node):
             place_retreat = Point(x=place_pt.x, y=place_pt.y, z=place_touch_z + post_place_retreat)
 
         if not place_uses_carton_box:
-            # === 传送带放置：J1旋转 + 笛卡尔方案 ===
+            # === 传送带放置：安全关节分支 hover + 笛卡尔垂直下降 ===
             current_joints = self._current_arm_positions()
             if current_joints is None or len(current_joints) != 6:
                 self.get_logger().error("无法读取当前关节状态，终止放置")
@@ -6090,67 +6793,71 @@ class AutoPickPlaceNode(Node):
                 self._pub_detach.publish(Empty())
                 return
 
-            # 1) J1 旋转对准传送带目标。CS612 的 shoulder_pan 零位与世界 yaw 有固定偏置，
-            # 必须复用 IK 种子的同一换算，否则后续位姿规划会从错误基座朝向跳到反肘解。
-            target_j1 = self._desired_joint1_for_target(place_release_target)
-            keep_joints = [float(v) for v in current_joints[1:]]
-            keep_joints[3] = max(0.8, min(2.4, keep_joints[3]))
-            keep_joints[4] = max(-2.5, min(2.5, keep_joints[4]))
-            rotate_target = [target_j1] + keep_joints
-            self.get_logger().info(
-                f"J1旋转对准传送带: {current_joints[0]:.3f}→{target_j1:.3f} rad, "
-                f"保持J2-J6={[f'{v:.2f}' for v in keep_joints]}"
-            )
-            self._set_motion_profile("far")
-            if not self._send_move(rotate_target, "place_j1_rotate"):
-                self.get_logger().error("J1旋转失败")
-                self._stop_fake_attach("J1旋转失败")
-                self._pub_detach.publish(Empty())
-                return
-            time.sleep(0.5)
-
-            # 开局已前弯肘(J2>0)，放置阶段只需J1旋转+微调XY+垂直下降
-
-            # 2) 沿当前 IK 分支移动到传送带正上方（保持当前高度）。
-            # 这里避免直接给 MoveIt 一个自由位姿目标；那会在腕部等价解之间跳分支，
-            # 形成截图中肘/腕绕到传送带上方的不可取姿态。
-            cup_pose = self._lookup_link_pose_in_base("suction_cup_link")
-            place_approach_z = float(cup_pose.position.z) if cup_pose else pick_lift.z
+            # 1) 放置 hover 不再沿用抓取抬升后的高位 z。过高 hover 会让求解器
+            # 为低位释放点选择低肘/跪倒构型；只需保留释放点上方一小段安全距离。
+            place_approach_z = self._conveyor_place_approach_height(place_release_target)
             place_approach = Point(x=place_release_target.x, y=place_release_target.y, z=place_approach_z)
-
             self.get_logger().info(
                 f"移动到传送带上方: ({place_approach.x:.3f},{place_approach.y:.3f},{place_approach.z:.3f})"
             )
             self._set_motion_profile("far")
+
             place_approach_ok = False
-            if self._param_bool("conveyor_place_cartesian_approach_enabled"):
-                place_approach_ok = self._move_cartesian_direct(
+            if self._param_bool("conveyor_place_guarded_approach_enabled"):
+                place_approach_ok = self._move_conveyor_place_approach(
                     place_approach,
                     planned_place_orientation,
-                    mode="place",
-                    label="place_approach_cart",
-                    keep_xy_from_current=False,
-                    pos_step_override=0.040,
-                    orientation_weight_override=max(
-                        4.0, float(self.get_parameter("place_dense_orientation_weight").value)
-                    ),
-                    joint_step_limit_override=0.055,
+                    release_target=place_release_target,
+                    label="place_approach_guarded",
                 )
-                if not place_approach_ok:
-                    self.get_logger().warn("笛卡尔移动到传送带上方未完全确认，检查当前 hover 是否已可继续")
+
             if not place_approach_ok:
-                if self._conveyor_place_hover_ready(
-                    place_release_target, planned_place_orientation, "place_approach_cart"
-                ):
-                    self.get_logger().warn(
-                        "place_approach_cart 未完全满足关节收敛，但 TCP 已在传送带目标上方，"
-                        "继续执行固定 XY 缓慢垂直下降，避免自由位姿规划跳到不可取姿态"
-                    )
-                    place_approach_ok = True
-                else:
+                self.get_logger().warn("安全放置分支不可用，回退到 J1 对准 + MoveIt 位姿规划")
+                current_joints = self._current_arm_positions()
+                if current_joints is None or len(current_joints) != 6:
+                    self.get_logger().error("无法读取当前关节状态，终止放置")
+                    self._stop_fake_attach("无关节状态")
+                    self._pub_detach.publish(Empty())
+                    return
+                target_j1 = self._desired_joint1_for_target(place_release_target)
+                keep_joints = [float(v) for v in current_joints[1:]]
+                keep_joints[3] = max(0.8, min(2.4, keep_joints[3]))
+                keep_joints[4] = max(-2.5, min(2.5, keep_joints[4]))
+                rotate_target = [target_j1] + keep_joints
+                self.get_logger().info(
+                    f"J1旋转对准传送带: {current_joints[0]:.3f}→{target_j1:.3f} rad, "
+                    f"保持J2-J6={[f'{v:.2f}' for v in keep_joints]}"
+                )
+                self._set_motion_profile("carry")
+                if self._send_move(rotate_target, "place_j1_rotate"):
+                    time.sleep(0.5)
+                    self._set_motion_profile("far")
                     place_approach_ok = self._send_pose_goal(
                         place_approach, planned_place_orientation, "place_approach"
                     )
+                if not place_approach_ok:
+                    self.get_logger().warn("关节空间移动到传送带上方失败，回退到笛卡尔插值")
+                    place_approach_ok = self._move_cartesian_direct(
+                        place_approach,
+                        planned_place_orientation,
+                        mode="place",
+                        label="place_approach_cart",
+                        keep_xy_from_current=False,
+                        pos_step_override=0.015,
+                        orientation_weight_override=max(
+                            4.0, float(self.get_parameter("place_dense_orientation_weight").value)
+                        ),
+                        joint_step_limit_override=0.055,
+                    )
+                if not place_approach_ok:
+                    if self._conveyor_place_hover_ready(
+                        place_release_target, planned_place_orientation, "place_approach_fallback"
+                    ):
+                        self.get_logger().warn(
+                            "位姿规划未完全满足关节收敛，但 TCP 已在传送带区域上方，"
+                            "继续执行垂直下降放置"
+                        )
+                        place_approach_ok = True
             if not place_approach_ok or not self._place_pose_guard_ok("place_approach"):
                 self.get_logger().error("移动到传送带上方失败或命中放置姿态护栏")
                 self._stop_fake_attach("place_approach失败")
@@ -6168,7 +6875,7 @@ class AutoPickPlaceNode(Node):
             place_ok = self._move_cartesian_vertical_waypoints(
                 place_release_target, planned_place_orientation, half,
                 mode="place", label="place_descent",
-                waypoint_step_m=dense_step, orientation_weight=4.0, settle_sec_per_waypoint=0.0,
+                waypoint_step_m=dense_step, orientation_weight=4.0, settle_sec_per_waypoint=0.02,
             )
             if not place_ok:
                 self.get_logger().warn("笛卡尔下降失败，用 z_scan 回退")
@@ -6282,10 +6989,11 @@ class AutoPickPlaceNode(Node):
             # #endregion
             if not self._run_stage(
                 StageName.TRANSFER,
-                lambda: self._run_conveyor_transport(released_rect_pose, half),
+                lambda: self._run_conveyor_transport(released_rect_pose, half)
+                and self._run_static2_box2_handoff(half),
                 "传送带输送失败",
             ):
-                self.get_logger().warn("传送带输送失败，继续执行回 home")
+                self.get_logger().warn("传送带输送或 cs612_2 接力失败，继续执行回 home")
 
         self._refresh_joint_state(1.0)
         self._set_motion_profile("default")

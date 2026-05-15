@@ -188,31 +188,98 @@
       </plugin>
     </model>
 
+    <!-- 第二个透明容器：供 cs612_2 在传送带末端接力放置 rect_pickup -->
+    <model name="box2">
+      <pose>2.90000 0.00000 0 0 0 0</pose>
+      <static>true</static>
+      <link name="base">
+        <visual name="floor">
+          <pose>0 0 0.003 0 0 0</pose>
+          <geometry>
+            <box><size>0.42 0.30 0.006</size></box>
+          </geometry>
+          <material>
+            <ambient>0.75 0.90 0.95 0.22</ambient>
+            <diffuse>0.75 0.95 1.00 0.25</diffuse>
+          </material>
+        </visual>
+        <collision name="floor_c">
+          <pose>0 0 0.003 0 0 0</pose>
+          <geometry>
+            <box><size>0.42 0.30 0.006</size></box>
+          </geometry>
+        </collision>
+        <visual name="wall_px">
+          <pose>0.206 0 0.110 0 0 0</pose>
+          <geometry><box><size>0.008 0.30 0.22</size></box></geometry>
+          <material>
+            <ambient>0.75 0.90 0.95 0.18</ambient>
+            <diffuse>0.75 0.95 1.00 0.2</diffuse>
+          </material>
+        </visual>
+        <collision name="wall_px_c">
+          <pose>0.206 0 0.110 0 0 0</pose>
+          <geometry><box><size>0.008 0.30 0.22</size></box></geometry>
+        </collision>
+        <visual name="wall_nx">
+          <pose>-0.206 0 0.110 0 0 0</pose>
+          <geometry><box><size>0.008 0.30 0.22</size></box></geometry>
+          <material>
+            <ambient>0.75 0.90 0.95 0.18</ambient>
+            <diffuse>0.75 0.95 1.00 0.2</diffuse>
+          </material>
+        </visual>
+        <collision name="wall_nx_c">
+          <pose>-0.206 0 0.110 0 0 0</pose>
+          <geometry><box><size>0.008 0.30 0.22</size></box></geometry>
+        </collision>
+        <visual name="wall_py">
+          <pose>0 0.146 0.110 0 0 0</pose>
+          <geometry><box><size>0.42 0.008 0.22</size></box></geometry>
+          <material>
+            <ambient>0.75 0.90 0.95 0.18</ambient>
+            <diffuse>0.75 0.95 1.00 0.2</diffuse>
+          </material>
+        </visual>
+        <collision name="wall_py_c">
+          <pose>0 0.146 0.110 0 0 0</pose>
+          <geometry><box><size>0.42 0.008 0.22</size></box></geometry>
+        </collision>
+        <visual name="wall_ny">
+          <pose>0 -0.146 0.110 0 0 0</pose>
+          <geometry><box><size>0.42 0.008 0.22</size></box></geometry>
+          <material>
+            <ambient>0.75 0.90 0.95 0.18</ambient>
+            <diffuse>0.75 0.95 1.00 0.2</diffuse>
+          </material>
+        </visual>
+        <collision name="wall_ny_c">
+          <pose>0 -0.146 0.110 0 0 0</pose>
+          <geometry><box><size>0.42 0.008 0.22</size></box></geometry>
+        </collision>
+      </link>
+      <plugin filename="ignition-gazebo-pose-publisher-system"
+              name="ignition::gazebo::systems::PosePublisher">
+        <publish_model_pose>true</publish_model_pose>
+        <publish_link_pose>true</publish_link_pose>
+        <publish_collision_pose>false</publish_collision_pose>
+        <publish_visual_pose>false</publish_visual_pose>
+        <publish_nested_model_pose>false</publish_nested_model_pose>
+        <use_pose_vector_msg>false</use_pose_vector_msg>
+        <static_publisher>true</static_publisher>
+        <static_update_frequency>2</static_update_frequency>
+      </plugin>
+    </model>
+
     <!-- 机器人由 cs612_moveit_config/launch/bringup.launch.py 通过官方 Elite Xacro
-         和 ros_gz_sim create 生成，避免与旧 model://CS612 重复生成两台机械臂。 -->
+         和 ros_gz_sim create 生成。cs612 与 cs612_2 都是真实可控模型。 -->
 
     <!--
       多机械臂布局参考：
-      1 号机械臂仍由 bringup.launch.py 动态生成在 base_link/world 原点。
-      2/3 号为 models/CS612_static：CS612 连杆 + 自定义吸盘的静态展示模型，由 include pose 放置；
-      不参与 ros2_control / MoveIt / 吸附话题。
-      Gazebo 俯视关系：1 号左上，2 号中右，3 号右下。
+      1 号机械臂 cs612 由 bringup.launch.py 动态生成在 base_link/world 原点。
+      2 号机械臂 cs612_2 由 bringup.launch.py 动态生成在传送带另一侧，使用独立 ros2_control。
     -->
-    <include>
-      <name>cs612_static_2</name>
-      <uri>model://CS612_static</uri>
-      <!-- 1 -> 2: x=2016.50mm, top-view y=-710.94mm, z=1.41mm -->
-      <pose>2.01650 -0.71094 0.00141 0 0 0</pose>
-    </include>
-
-    <include>
-      <name>cs612_static_3</name>
-      <uri>model://CS612_static</uri>
-      <!-- 1 -> 3: x=2607.25mm, top-view y=-993.29mm, z=30.13mm -->
-      <pose>2.60725 -0.99329 0.03013 0 0 0</pose>
-    </include>
-
-    <!-- 中间传送带：位于 arm1 (cs612) 与 arm2 (cs612_static_2) 之间的几何中点，
+    <!-- 中间传送带：位于 arm1 (cs612) 与 arm2 (cs612_2) 之间的几何中点，
          方向与两机械臂连线一致。模型原点在底面中心。 -->
     <include>
       <name>middle_conveyor</name>

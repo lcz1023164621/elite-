@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(colcon build *)",
+      "Bash(pkill -f \"gz sim\")",
+      "Bash(pkill -f \"gz server\")",
+      "Bash(pkill -f \"ruby /usr/bin/ign\")",
+      "Bash(kill -9 11138 11784 12350 12351)",
+      "Bash(pkill -9 -f \"ign gazebo\")",
+      "Bash(pkill -9 -f \"gz sim\")",
+      "Bash(pkill -9 -f \"gz server\")",
+      "Bash(awk '{print $2, $11, $12, $13}')",
+      "Bash(dpkg -l)",
+      "Bash(ros2 pkg *)",
+      "Bash(python3 *)"
+    ]
+  }
+}

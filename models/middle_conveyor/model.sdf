@@ -80,7 +80,7 @@
             <ode>
               <kp>500000.0</kp>
               <kd>2000.0</kd>
-              <max_vel>0.02</max_vel>
+              <max_vel>0.50</max_vel>
               <min_depth>0.0005</min_depth>
             </ode>
           </contact>

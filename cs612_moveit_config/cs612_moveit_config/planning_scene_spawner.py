@@ -121,10 +121,14 @@ class PlanningSceneSpawner(Node):
         self._cfg = _load_yaml()
         r = self._cfg.get("rect_pickup") or {}
         cbox = self._cfg.get("carton_box") or {}
+        box2 = self._cfg.get("box2") or {}
         self._rect_size: list[float] = list(r.get("size_xyz", [0.20, 0.14, 0.08]))
         self._carton_outer = list(cbox.get("outer_size_xyz", [0.42, 0.30, 0.22]))
         self._carton_wall_t = float(cbox.get("wall_thickness", 0.008))
         self._carton_floor_t = float(cbox.get("floor_thickness", 0.006))
+        self._box2_outer = list(box2.get("outer_size_xyz", self._carton_outer))
+        self._box2_wall_t = float(box2.get("wall_thickness", self._carton_wall_t))
+        self._box2_floor_t = float(box2.get("floor_thickness", self._carton_floor_t))
         self._ground_size = [4.0, 4.0]
         self._ground_thickness = 0.02
         mconv = self._cfg.get("middle_conveyor") or {}
@@ -139,6 +143,14 @@ class PlanningSceneSpawner(Node):
         )
         self._carton_fallback.pose.orientation = _quat_from_rpy(0.0, 0.0, 0.0)
 
+        bp = box2.get("model_pose_xyz", [2.90000, 0.00000, 0.0])
+        self._box2_fallback = PoseStamped()
+        self._box2_fallback.header.frame_id = "base_link"
+        self._box2_fallback.pose.position = Point(
+            x=float(bp[0]), y=float(bp[1]), z=float(bp[2])
+        )
+        self._box2_fallback.pose.orientation = _quat_from_rpy(0.0, 0.0, 0.0)
+
         rc = r.get("center_xyz", [-0.82, 0.30, 0.046])
         self._rect_fallback = PoseStamped()
         self._rect_fallback.header.frame_id = "base_link"
@@ -149,6 +161,7 @@ class PlanningSceneSpawner(Node):
 
         self._rect: PoseStamped | None = None
         self._carton: PoseStamped | None = None
+        self._box2: PoseStamped | None = None
         self._gz_suction_attached = False
         self._assumed_suction_attached = False
         self._prev_suction_attached = False
@@ -169,6 +182,12 @@ class PlanningSceneSpawner(Node):
             PoseStamped,
             "/model/carton_box/pose",
             self._on_carton,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            PoseStamped,
+            "/model/box2/pose",
+            self._on_box2,
             qos_profile_sensor_data,
         )
         self.create_subscription(
@@ -236,6 +255,12 @@ class PlanningSceneSpawner(Node):
             )
             # #endregion
 
+    def _on_box2(self, msg: PoseStamped) -> None:
+        p = msg.pose.position
+        if abs(p.x) < 1e-5 and abs(p.y) < 1e-5 and abs(p.z) < 1e-5:
+            return
+        self._box2 = msg
+
     def _on_world_pose_info(self, msg: TFMessage) -> None:
         rect = extract_model_pose(msg, "rect_pickup")
         if rect is not None:
@@ -243,6 +268,9 @@ class PlanningSceneSpawner(Node):
         carton = extract_model_pose(msg, "carton_box")
         if carton is not None:
             self._on_carton(carton)
+        box2 = extract_model_pose(msg, "box2")
+        if box2 is not None:
+            self._on_box2(box2)
 
     def _on_suction_state(self, msg: Bool) -> None:
         was = self._suction_attached
@@ -295,9 +323,13 @@ class PlanningSceneSpawner(Node):
         ps = self._carton if self._carton is not None else self._carton_fallback
         return self._pose_to_base(ps)
 
+    def _effective_box2(self) -> PoseStamped:
+        ps = self._box2 if self._box2 is not None else self._box2_fallback
+        return self._pose_to_base(ps)
+
     def _pose_to_base(self, ps: PoseStamped) -> PoseStamped:
         raw = (ps.header.frame_id or "").strip()
-        if raw in ("", "world", "arm_world", "map", "base_link", "rect_pickup", "carton_box"):
+        if raw in ("", "world", "arm_world", "map", "base_link", "rect_pickup", "carton_box", "box2"):
             out = PoseStamped()
             out.header.frame_id = "base_link"
             out.header.stamp = ps.header.stamp
@@ -327,10 +359,13 @@ class PlanningSceneSpawner(Node):
     def _build_objects(self) -> list[CollisionObject]:
         rect_ps = self._effective_rect()
         carton_ps = self._effective_carton()
+        box2_ps = self._effective_box2()
         rq = rect_ps.pose.orientation
         rp = rect_ps.pose.position
         cq = carton_ps.pose.orientation
         cp = carton_ps.pose.position
+        b2q = box2_ps.pose.orientation
+        b2p = box2_ps.pose.position
 
         sx, sy, sz = [float(v) for v in self._rect_size]
         objects: list[CollisionObject] = [
@@ -383,6 +418,48 @@ class PlanningSceneSpawner(Node):
                     _point_off(cp, cq, 0.0, -wcy, half_h),
                     cq,
                     [bx, wt, bz],
+                ),
+            ]
+        )
+        b2x, b2y, b2z = self._box2_outer
+        b2_wt = self._box2_wall_t
+        b2_ft = self._box2_floor_t
+        b2_half_x = 0.5 * b2x
+        b2_half_y = 0.5 * b2y
+        b2_half_h = 0.5 * b2z
+        b2_wcx = b2_half_x - 0.5 * b2_wt
+        b2_wcy = b2_half_y - 0.5 * b2_wt
+        objects.extend(
+            [
+                _make_box(
+                    "scene_box2_floor",
+                    _point_off(b2p, b2q, 0.0, 0.0, 0.5 * b2_ft),
+                    b2q,
+                    [b2x, b2y, b2_ft],
+                ),
+                _make_box(
+                    "scene_box2_wall_px",
+                    _point_off(b2p, b2q, b2_wcx, 0.0, b2_half_h),
+                    b2q,
+                    [b2_wt, b2y, b2z],
+                ),
+                _make_box(
+                    "scene_box2_wall_nx",
+                    _point_off(b2p, b2q, -b2_wcx, 0.0, b2_half_h),
+                    b2q,
+                    [b2_wt, b2y, b2z],
+                ),
+                _make_box(
+                    "scene_box2_wall_py",
+                    _point_off(b2p, b2q, 0.0, b2_wcy, b2_half_h),
+                    b2q,
+                    [b2x, b2_wt, b2z],
+                ),
+                _make_box(
+                    "scene_box2_wall_ny",
+                    _point_off(b2p, b2q, 0.0, -b2_wcy, b2_half_h),
+                    b2q,
+                    [b2x, b2_wt, b2z],
                 ),
             ]
         )
@@ -482,7 +559,7 @@ class PlanningSceneSpawner(Node):
                     if res is not None and res.success and self._pending_rev is not None:
                         self._applied_revision = self._pending_rev
                         self.get_logger().info(
-                            "已将 rect_pickup + carton_box 写入 MoveIt PlanningScene（RViz 打开 MotionPlanning → Scene Geometry）。"
+                            "已将 rect_pickup + carton_box + box2 写入 MoveIt PlanningScene（RViz 打开 MotionPlanning → Scene Geometry）。"
                         )
                     else:
                         self.get_logger().warn("apply_planning_scene 返回失败，将重试。")

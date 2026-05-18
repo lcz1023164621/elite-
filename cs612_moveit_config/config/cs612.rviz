@@ -261,7 +261,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /cs612_2/monitored_planning_scene
-      Robot Description: /cs612_2/robot_description
+      Robot Description: cs612_2_robot_description
       Scene Geometry:
         Scene Alpha: 0.35
         Scene Color: 245; 245; 245

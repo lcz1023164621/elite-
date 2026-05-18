@@ -97,7 +97,7 @@ def _make_box(
 ) -> CollisionObject:
     co = CollisionObject()
     co.id = object_id
-    co.header.frame_id = "base_link"
+    co.header.frame_id = "world"
     prim = SolidPrimitive()
     prim.type = SolidPrimitive.BOX
     prim.dimensions = [float(size_xyz[0]), float(size_xyz[1]), float(size_xyz[2])]
@@ -210,8 +210,16 @@ class PlanningSceneSpawner(Node):
             self._on_visual_attached,
             qos_profile_sensor_data,
         )
+        # cs612_2 独立吸附状态
+        self._gz_cs612_2_suction_attached = False
+        self._assumed_cs612_2_suction_attached = False
+        self._cs612_2_attach_offset: Pose | None = None
+        self.create_subscription(Bool, "/cs612_2/suction/state", self._on_cs612_2_suction_state, qos_profile_sensor_data)
+        self.create_subscription(Bool, "/cs612_2/suction/assumed_state", self._on_cs612_2_assumed_state, qos_profile_sensor_data)
         self._client = self.create_client(ApplyPlanningScene, "/apply_planning_scene")
+        self._client_cs612_2 = self.create_client(ApplyPlanningScene, "/cs612_2/apply_planning_scene")
         self._pending = None
+        self._pending_cs612_2 = None
         self._pending_rev: int | None = None
         self._dbg_service_wait_logged = False
         self.declare_parameter("scene_update_quantization_m", 0.02)
@@ -222,6 +230,10 @@ class PlanningSceneSpawner(Node):
     @property
     def _suction_attached(self) -> bool:
         return self._gz_suction_attached or self._assumed_suction_attached
+
+    @property
+    def _cs612_2_suction_attached(self) -> bool:
+        return self._gz_cs612_2_suction_attached or self._assumed_cs612_2_suction_attached
 
     def _on_rect(self, msg: PoseStamped) -> None:
         p = msg.pose.position
@@ -291,6 +303,43 @@ class PlanningSceneSpawner(Node):
     def _on_visual_attached(self, msg: Bool) -> None:
         self._visual_attached = bool(msg.data)
 
+    def _on_cs612_2_suction_state(self, msg: Bool) -> None:
+        was = self._cs612_2_suction_attached
+        self._gz_cs612_2_suction_attached = bool(msg.data)
+        if self._cs612_2_suction_attached and not was:
+            self._record_cs612_2_attach_offset()
+
+    def _on_cs612_2_assumed_state(self, msg: Bool) -> None:
+        was = self._cs612_2_suction_attached
+        self._assumed_cs612_2_suction_attached = bool(msg.data)
+        self.get_logger().info(
+            f"收到 cs612_2 assumed_state: {self._assumed_cs612_2_suction_attached} (suction_attached 变为 {self._cs612_2_suction_attached})"
+        )
+        if self._cs612_2_suction_attached and not was:
+            self._record_cs612_2_attach_offset()
+
+    def _record_cs612_2_attach_offset(self) -> None:
+        if self._rect is None:
+            self.get_logger().warn("无法记录 cs612_2 attach 偏移: rect_pose 尚未收到")
+            return
+        try:
+            from rclpy.duration import Duration as RclDuration
+
+            tf = self._tf_buffer.lookup_transform(
+                "cs612_2_suction_tcp_link",
+                "base_link",
+                rclpy.time.Time(),
+                timeout=RclDuration(seconds=0.5),
+            )
+            rect_ps = self._effective_rect()
+            self._cs612_2_attach_offset = do_transform_pose(rect_ps.pose, tf)
+            self.get_logger().info(
+                f"记录 cs612_2 attach 偏移: cs612_2_suction_tcp_link 下 ({self._cs612_2_attach_offset.position.x:.4f}, "
+                f"{self._cs612_2_attach_offset.position.y:.4f}, {self._cs612_2_attach_offset.position.z:.4f})"
+            )
+        except Exception as e:
+            self.get_logger().warn(f"无法记录 cs612_2 attach 偏移: {e}")
+
     def _record_attach_offset(self) -> None:
         """记录 attach 瞬间 rect_pickup 相对于 suction_tcp_link 的位姿。"""
         if self._rect is None:
@@ -356,7 +405,7 @@ class PlanningSceneSpawner(Node):
             out.pose = ps.pose
             return out
 
-    def _build_objects(self) -> list[CollisionObject]:
+    def _build_objects(self, for_cs612_2: bool = False) -> list[CollisionObject]:
         rect_ps = self._effective_rect()
         carton_ps = self._effective_carton()
         box2_ps = self._effective_box2()
@@ -367,6 +416,8 @@ class PlanningSceneSpawner(Node):
         b2q = box2_ps.pose.orientation
         b2p = box2_ps.pose.position
 
+        suction_holding = self._cs612_2_suction_attached if for_cs612_2 else (self._suction_attached or self._visual_attached)
+
         sx, sy, sz = [float(v) for v in self._rect_size]
         objects: list[CollisionObject] = [
             _make_box(
@@ -376,7 +427,7 @@ class PlanningSceneSpawner(Node):
                 [self._ground_size[0], self._ground_size[1], self._ground_thickness],
             ),
         ]
-        if not (self._suction_attached or self._visual_attached):
+        if not suction_holding:
             objects.append(_make_box("scene_rect_pickup", Point(x=rp.x, y=rp.y, z=rp.z), rq, [sx, sy, sz]))
 
         bx, by, bz = self._carton_outer
@@ -533,6 +584,32 @@ class PlanningSceneSpawner(Node):
         aco.touch_links = ["suction_tcp_link", "suction_cup_link", "ee_link", "tool0"]
         return aco
 
+    def _build_cs612_2_attached_object(self) -> AttachedCollisionObject | None:
+        if not self._cs612_2_suction_attached:
+            return None
+        sx, sy, sz = [float(v) for v in self._rect_size]
+        aco = AttachedCollisionObject()
+        aco.link_name = "cs612_2_suction_tcp_link"
+        aco.object = CollisionObject()
+        aco.object.id = "scene_rect_pickup"
+        aco.object.header.frame_id = "cs612_2_suction_tcp_link"
+        aco.object.operation = CollisionObject.ADD
+        prim = SolidPrimitive()
+        prim.type = SolidPrimitive.BOX
+        prim.dimensions = [sx, sy, sz]
+        aco.object.primitives = [prim]
+        if self._cs612_2_attach_offset is not None:
+            aco.object.primitive_poses = [self._cs612_2_attach_offset]
+        else:
+            aco.object.primitive_poses = [
+                Pose(
+                    position=Point(x=0.0, y=0.0, z=-0.0495),
+                    orientation=Quaternion(x=0.0, y=0.0, z=0.0, w=1.0),
+                )
+            ]
+        aco.touch_links = ["cs612_2_suction_tcp_link", "cs612_2_suction_cup_link", "cs612_2_ee_link", "cs612_2_tool0"]
+        return aco
+
     def _stable_rev(self) -> int:
         """仿真位姿有微小抖动，用厘米级量化避免无意义重复 apply。"""
         r = self._effective_rect().pose.position
@@ -548,10 +625,12 @@ class PlanningSceneSpawner(Node):
                 round(c.z / q),
                 self._suction_attached,
                 self._visual_attached,
+                self._cs612_2_suction_attached,
             )
         )
 
     def _tick(self) -> None:
+        # 处理主 move_group pending
         if self._pending is not None:
             if self._pending.done():
                 try:
@@ -562,11 +641,30 @@ class PlanningSceneSpawner(Node):
                             "已将 rect_pickup + carton_box + box2 写入 MoveIt PlanningScene（RViz 打开 MotionPlanning → Scene Geometry）。"
                         )
                     else:
-                        self.get_logger().warn("apply_planning_scene 返回失败，将重试。")
+                        self.get_logger().warn("apply_planning_scene (主) 返回失败，将重试。")
                 except Exception as e:
-                    self.get_logger().warn(f"apply_planning_scene 异常: {e}")
+                    self.get_logger().warn(f"apply_planning_scene (主) 异常: {e}")
                 self._pending = None
-                self._pending_rev = None
+            # 主 pending 未完成时不阻塞 cs612_2 的发送，fall through
+
+        # 处理 cs612_2 move_group pending
+        if self._pending_cs612_2 is not None:
+            if self._pending_cs612_2.done():
+                try:
+                    res = self._pending_cs612_2.result()
+                    if res is not None and res.success:
+                        self.get_logger().info(
+                            "已将 rect_pickup + carton_box + box2 写入 cs612_2 MoveIt PlanningScene。"
+                        )
+                    else:
+                        self.get_logger().warn("apply_planning_scene (cs612_2) 返回失败，将重试。")
+                except Exception as e:
+                    self.get_logger().warn(f"apply_planning_scene (cs612_2) 异常: {e}")
+                self._pending_cs612_2 = None
+            # cs612_2 pending 未完成时继续尝试主发送，fall through
+
+        # 如果主 pending 还在进行中，不重复发送（用 revision 去重）
+        if self._pending is not None and self._pending_cs612_2 is not None:
             return
 
         if (
@@ -575,57 +673,93 @@ class PlanningSceneSpawner(Node):
         ):
             return
 
-        if not self._client.wait_for_service(timeout_sec=0.0):
+        rev = self._stable_rev()
+        if self._applied_revision is not None and self._applied_revision == rev:
+            return
+
+        # 检查主 move_group 服务
+        main_ready = self._client.wait_for_service(timeout_sec=0.0)
+        if not main_ready:
             if not self._dbg_service_wait_logged:
                 self._dbg_service_wait_logged = True
-                # #region agent log
                 _debug_log(
                     "planning_scene_spawner.py:_tick",
                     "apply_service_not_ready",
                     "H3",
                     {},
                 )
-                # #endregion
-            return
-        self._dbg_service_wait_logged = False
-        rev = self._stable_rev()
-        if self._applied_revision is not None and self._applied_revision == rev:
+        else:
+            self._dbg_service_wait_logged = False
+
+        cs612_2_ready = self._client_cs612_2.wait_for_service(timeout_sec=0.0)
+
+        if not main_ready and not cs612_2_ready:
             return
 
-        scene = PlanningScene()
-        scene.is_diff = True
-        scene.world.collision_objects = self._build_objects()
-        attached = self._build_attached_object()
-        if attached is not None:
-            scene.robot_state.is_diff = True
-            scene.robot_state.attached_collision_objects = [attached]
-        else:
-            # 显式发送 REMOVE，确保之前残留的 attached object 被清除
-            scene.robot_state.is_diff = True
-            aco_remove = AttachedCollisionObject()
-            aco_remove.link_name = "suction_tcp_link"
-            aco_remove.object = CollisionObject()
-            aco_remove.object.id = "scene_rect_pickup"
-            aco_remove.object.operation = CollisionObject.REMOVE
-            scene.robot_state.attached_collision_objects = [aco_remove]
-        req = ApplyPlanningScene.Request()
-        req.scene = scene
-        self._pending_rev = rev
-        self._pending = self._client.call_async(req)
-        # #region agent log
-        _debug_log(
-            "planning_scene_spawner.py:_tick",
-            "apply_scene_sent",
-            "H1",
-            {
-                "rev": int(rev),
-                "object_count": len(scene.world.collision_objects),
-                "has_rect_pose": self._rect is not None,
-                "has_carton_pose": self._carton is not None,
-                "attached": bool(self._suction_attached or self._visual_attached),
-            },
-        )
-        # #endregion
+        # ---- 主 move_group (/apply_planning_scene) ----
+        if main_ready and self._pending is None:
+            scene = PlanningScene()
+            scene.is_diff = True
+            scene.world.collision_objects = self._build_objects(for_cs612_2=False)
+            attached = self._build_attached_object()
+            if attached is not None:
+                scene.robot_state.is_diff = True
+                scene.robot_state.attached_collision_objects = [attached]
+            else:
+                scene.robot_state.is_diff = True
+                aco_remove = AttachedCollisionObject()
+                aco_remove.link_name = "suction_tcp_link"
+                aco_remove.object = CollisionObject()
+                aco_remove.object.id = "scene_rect_pickup"
+                aco_remove.object.operation = CollisionObject.REMOVE
+                scene.robot_state.attached_collision_objects = [aco_remove]
+            req = ApplyPlanningScene.Request()
+            req.scene = scene
+            self._pending_rev = rev
+            self._pending = self._client.call_async(req)
+            _debug_log(
+                "planning_scene_spawner.py:_tick",
+                "apply_scene_sent",
+                "H1",
+                {
+                    "rev": int(rev),
+                    "target": "/apply_planning_scene",
+                    "object_count": len(scene.world.collision_objects),
+                    "attached": bool(self._suction_attached or self._visual_attached),
+                },
+            )
+
+        # ---- cs612_2 move_group (/cs612_2/apply_planning_scene) ----
+        if cs612_2_ready and self._pending_cs612_2 is None:
+            scene2 = PlanningScene()
+            scene2.is_diff = True
+            scene2.world.collision_objects = self._build_objects(for_cs612_2=True)
+            attached2 = self._build_cs612_2_attached_object()
+            if attached2 is not None:
+                scene2.robot_state.is_diff = True
+                scene2.robot_state.attached_collision_objects = [attached2]
+            else:
+                scene2.robot_state.is_diff = True
+                aco_remove2 = AttachedCollisionObject()
+                aco_remove2.link_name = "cs612_2_suction_tcp_link"
+                aco_remove2.object = CollisionObject()
+                aco_remove2.object.id = "scene_rect_pickup"
+                aco_remove2.object.operation = CollisionObject.REMOVE
+                scene2.robot_state.attached_collision_objects = [aco_remove2]
+            req2 = ApplyPlanningScene.Request()
+            req2.scene = scene2
+            self._pending_cs612_2 = self._client_cs612_2.call_async(req2)
+            _debug_log(
+                "planning_scene_spawner.py:_tick",
+                "apply_scene_sent",
+                "H1",
+                {
+                    "rev": int(rev),
+                    "target": "/cs612_2/apply_planning_scene",
+                    "object_count": len(scene2.world.collision_objects),
+                    "attached": bool(self._cs612_2_suction_attached),
+                },
+            )
 
 
 def main() -> None:

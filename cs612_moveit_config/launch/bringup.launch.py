@@ -551,6 +551,12 @@ def _launch_setup(context, *args, **kwargs):
             robot_description_kinematics,
             robot_description_planning,
             {"use_sim_time": use_sim_time},
+            # cs612_2 robot model for RViz MotionPlanning_CS612_2 display
+            # (use clean names without '/' to avoid invalid ROS 2 node names)
+            {"cs612_2_robot_description": cs612_2_description_content},
+            {"cs612_2_robot_description_semantic": _prefix_srdf(srdf_text, prefix="cs612_2_", robot_name="cs612")},
+            {"cs612_2_robot_description_kinematics": _load_yaml(moveit_config_dir / "config" / "kinematics.yaml")},
+            {"cs612_2_robot_description_planning": _prefix_joint_limits(robot_description_planning["robot_description_planning"], "cs612_2_")},
         ],
         condition=IfCondition(launch_rviz),
     )

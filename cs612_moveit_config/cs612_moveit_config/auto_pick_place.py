@@ -2598,6 +2598,8 @@ class AutoPickPlaceNode(Node):
     def _box2_place_pose(self, rect_half: Sequence[float]) -> Pose:
         xyz = list(self.get_parameter("box2_pose_xyz").value)
         floor_top_z = float(self.get_parameter("box2_floor_top_z").value)
+        outer_size = [0.42, 0.30, 0.22]
+        wall_t = 0.008
         try:
             from ament_index_python.packages import get_package_share_directory
 
@@ -2606,14 +2608,29 @@ class AutoPickPlaceNode(Node):
             box2 = doc.get("box2") or {}
             xyz = list(box2.get("model_pose_xyz", xyz))
             floor_top_z = float(box2.get("floor_top_z", floor_top_z))
+            outer_size = list(box2.get("outer_size_xyz", outer_size))
+            wall_t = float(box2.get("wall_thickness", wall_t))
         except Exception:
             pass
         if len(xyz) != 3:
             xyz = [2.90000, 0.00000, 0.0]
+        if len(outer_size) != 3:
+            outer_size = [0.42, 0.30, 0.22]
+        half_x = max(0.001, float(rect_half[0]) if len(rect_half) >= 1 else 0.10)
+        half_y = max(0.001, float(rect_half[1]) if len(rect_half) >= 2 else 0.07)
         half_z = max(0.001, float(rect_half[2]) if len(rect_half) >= 3 else 0.04)
+        inner_half_x = max(0.0, 0.5 * float(outer_size[0]) - wall_t - half_x)
+        inner_half_y = max(0.0, 0.5 * float(outer_size[1]) - wall_t - half_y)
+        center_xy = [float(xyz[0]), float(xyz[1])]
+        try:
+            center_xy = list(box2.get("center_xy", center_xy))  # type: ignore[name-defined]
+        except Exception:
+            pass
+        if len(center_xy) != 2:
+            center_xy = [float(xyz[0]), float(xyz[1])]
         out = Pose()
-        out.position.x = float(xyz[0])
-        out.position.y = float(xyz[1])
+        out.position.x = min(max(float(center_xy[0]), float(xyz[0]) - inner_half_x), float(xyz[0]) + inner_half_x)
+        out.position.y = min(max(float(center_xy[1]), float(xyz[1]) - inner_half_y), float(xyz[1]) + inner_half_y)
         out.position.z = float(xyz[2]) + floor_top_z + half_z
         out.orientation = _quat_from_rpy(0.0, 0.0, 0.0)
         return out
@@ -2679,20 +2696,45 @@ class AutoPickPlaceNode(Node):
             [self._joint_limit_clamp(i, float(v)) for i, v in enumerate(target)],
             cur,
         )
+        # ros2_control 的 position controller 按 URDF 关节范围执行；等效角
+        # （例如 -4.71 与 1.57）对 IK/FK 成立，但会让控制器无法真正收敛。
+        target = [self._joint_limit_clamp(i, float(v)) for i, v in enumerate(target)]
         max_delta = max(self._joint_position_error(i, cur[i], target[i]) for i in range(len(_ARM_JOINTS)))
         step_limit = (
             step_limit_override
             if step_limit_override is not None
             else max(0.02, float(self.get_parameter("cs612_2_joint_step_limit_rad").value))
         )
+        # Gazebo GUI can make simulated time advance unevenly. Keep each
+        # ros2_control command small enough that the trajectory controller does
+        # not trip its per-joint path tolerance and switch to hold-position.
+        step_limit = min(float(step_limit), 0.10)
         steps = max(1, int(math.ceil(max_delta / step_limit)))
         dt = dt_override if dt_override is not None else max(0.04, float(self.get_parameter("cs612_2_joint_point_dt_sec").value))
+        dt = max(float(dt), 0.35)
         self.get_logger().info(f"cs612_2 ros2_control JointTrajectory: {label} steps={steps}")
+        waypoint_tol = max(0.09, min(0.16, step_limit * 1.6))
         for s in range(1, steps + 1):
             t = float(s) / float(steps)
-            cmd = [float(cur[i]) + t * (float(target[i]) - float(cur[i])) for i in range(len(_ARM_JOINTS))]
+            cmd = [
+                self._joint_limit_clamp(i, float(cur[i]) + t * (float(target[i]) - float(cur[i])))
+                for i in range(len(_ARM_JOINTS))
+            ]
             self._publish_cs612_2_joint_vector(cmd, lead_sec=dt)
-            time.sleep(dt)
+            waypoint_deadline = time.monotonic() + max(0.45, dt * 2.0)
+            while time.monotonic() < waypoint_deadline:
+                cur_step = self._current_cs612_2_positions()
+                if cur_step is not None:
+                    err_step = max(
+                        self._joint_position_error(i, cur_step[i], cmd[i])
+                        for i in range(len(_ARM_JOINTS))
+                    )
+                    if err_step <= waypoint_tol:
+                        break
+                time.sleep(0.04)
+            cur_latest = self._current_cs612_2_positions()
+            if cur_latest is not None:
+                cur = cur_latest
 
         timeout = max(0.5, float(self.get_parameter("cs612_2_joint_settle_timeout_sec").value))
         deadline = time.monotonic() + timeout
@@ -2704,10 +2746,47 @@ class AutoPickPlaceNode(Node):
                 if err <= tol:
                     self.get_logger().info(f"{label}: cs612_2 到位 max_err={err:.4f} rad")
                     return True
-            self._publish_cs612_2_joint_vector(target, lead_sec=dt)
+            self._publish_cs612_2_joint_vector(target, lead_sec=max(0.6, dt))
             time.sleep(0.08)
-        self.get_logger().warn(f"{label}: cs612_2 未完全收敛，继续执行后续步骤")
-        return True
+        final_err = None
+        cur2 = self._current_cs612_2_positions()
+        if cur2 is not None:
+            final_err = max(self._joint_position_error(i, cur2[i], target[i]) for i in range(len(_ARM_JOINTS)))
+        if final_err is None:
+            self.get_logger().warn(f"{label}: cs612_2 未完全收敛，且未收到最终关节状态")
+        else:
+            self.get_logger().warn(f"{label}: cs612_2 未完全收敛 max_err={final_err:.4f} rad")
+        return False
+
+    def _cs612_2_current_cup_world(self) -> Point | None:
+        joints = self._current_cs612_2_positions()
+        if joints is None or not self._kin_ready:
+            return None
+        bx, by, bz = self._cs612_2_base_xyz()
+        p, _, _, _ = self._fk_with_jacobian_context(joints)
+        return Point(x=float(p[0]) + bx, y=float(p[1]) + by, z=float(p[2]) + bz)
+
+    def _cs612_2_cup_near_target(
+        self,
+        target: Point,
+        label: str,
+        xy_tol: float = 0.045,
+        z_tol: float = 0.080,
+    ) -> bool:
+        cup = self._cs612_2_current_cup_world()
+        if cup is None:
+            self.get_logger().warn(f"{label}: 无法读取 cs612_2 吸盘位置")
+            return False
+        dx = float(cup.x) - float(target.x)
+        dy = float(cup.y) - float(target.y)
+        dz = float(cup.z) - float(target.z)
+        xy = math.hypot(dx, dy)
+        ok = xy <= max(0.005, xy_tol) and abs(dz) <= max(0.005, z_tol)
+        self.get_logger().info(
+            f"{label}: cs612_2 吸盘到目标校验 xy_err={xy:.4f}m, "
+            f"z_err={dz:.4f}m, xy_tol={xy_tol:.4f}, z_tol={z_tol:.4f}, ok={ok}"
+        )
+        return ok
 
     def _cs612_2_tcp_target_for_rect(
         self,
@@ -2884,27 +2963,12 @@ class AutoPickPlaceNode(Node):
 
     def _cs612_2_set_rect_pose_at_cup(self) -> None:
         """将 rect_pickup 传送到 cs612_2 吸盘下方（SetEntityPose 兜底）。
-        优先用 TF 查找 cs612_2_suction_cup_link，不可用时用 FK 从 cs612_2 关节角计算。
+        用 FK 从 cs612_2 关节角计算，避免二号臂辅助逻辑查询一号臂 base_link TF 链。
         """
-        cup_pose = self._lookup_link_pose_in_base("cs612_2_suction_cup_link")
+        cup_pose = self._cs612_2_current_cup_world()
         if cup_pose is None:
-            # TF 不可用，使用 FK 从 cs612_2 关节角计算杯座世界位姿
-            joints = self._current_cs612_2_positions()
-            if joints is not None and self._kin_ready:
-                bx, by, bz = self._cs612_2_base_xyz()
-                p, r, _, _ = self._fk_with_jacobian_context(joints)
-                # suction cup offset from flange (wrist_3_link → suction_cup_link): z=0
-                # suction_tcp_link is 0.214m below suction_cup_link
-                # cup contact surface is at suction_tcp_link level
-                tcp_z_local = p[2]  # TCP is at suction_cup_link origin (no offset in FK for suction cup)
-                cup_pose = Point(
-                    x=p[0] + bx,
-                    y=p[1] + by,
-                    z=tcp_z_local + bz,
-                )
-            else:
-                self.get_logger().warn("cs612_2 suction cup TF/FK 均不可用，跳过 SetEntityPose snap")
-                return
+            self.get_logger().warn("cs612_2 suction cup FK 不可用，跳过 SetEntityPose snap")
+            return
         half_z = 0.04
         try:
             half_z = max(0.01, float(self.get_parameter("box_half_size_xyz").value[2]))
@@ -2912,17 +2976,43 @@ class AutoPickPlaceNode(Node):
             pass
         suction_offset = float(self.get_parameter("suction_contact_offset_z").value)
         pose = Pose()
-        if isinstance(cup_pose, Point):
-            pose.position.x = float(cup_pose.x)
-            pose.position.y = float(cup_pose.y)
-            pose.position.z = float(cup_pose.z) - suction_offset - half_z
-        else:
-            # Pose from TF lookup
-            pose.position.x = float(cup_pose.position.x)
-            pose.position.y = float(cup_pose.position.y)
-            pose.position.z = float(cup_pose.position.z) - suction_offset - half_z
+        pose.position.x = float(cup_pose.x)
+        pose.position.y = float(cup_pose.y)
+        pose.position.z = float(cup_pose.z) - suction_offset - half_z
         pose.orientation = _quat_from_rpy(0.0, 0.0, 0.0)
         self._set_rect_pose(pose, wait_sec=0.1)
+
+    def _cs612_2_release_rect_at_box2(self, target: Pose, rect_half: Sequence[float], label: str) -> bool:
+        """Detach 后强制把 rect_pickup 落到 box2 内腔中心，避免未收敛时释放到箱外。"""
+        self._cs612_2_detach(label)
+        time.sleep(0.25)
+        ok = False
+        start_pose = self._rect.pose if self._rect is not None else target
+        start_z = max(float(start_pose.position.z), float(target.position.z) + 0.10)
+        steps = 8
+        for i in range(1, steps + 1):
+            t = float(i) / float(steps)
+            pose = Pose()
+            pose.position.x = float(target.position.x)
+            pose.position.y = float(target.position.y)
+            pose.position.z = start_z + (float(target.position.z) - start_z) * t
+            pose.orientation = target.orientation
+            ok = self._set_rect_pose(pose, wait_sec=0.18, log_timeout=False) or ok
+            time.sleep(0.06)
+        for i in range(3):
+            if self._set_rect_pose(target, wait_sec=0.5, log_timeout=(i == 2)):
+                ok = True
+                break
+            time.sleep(0.12)
+        self._apply_released_rect_collision_scene(target, rect_half)
+        if ok:
+            self.get_logger().info(
+                f"{label}: rect_pickup 已释放到 box2 内腔中心 "
+                f"({target.position.x:.3f},{target.position.y:.3f},{target.position.z:.3f})"
+            )
+        else:
+            self.get_logger().warn(f"{label}: box2 释放位姿 SetEntityPose 未确认")
+        return ok
 
     def _cs612_2_detach(self, label: str) -> None:
         for _ in range(3):
@@ -2991,10 +3081,18 @@ class AutoPickPlaceNode(Node):
         safe_ok = self._move_cs612_2_joint(solved["safe_approach"], f"{label}_safe_approach")
         pre_pick_ok = self._move_cs612_2_joint(solved["pre_pick"], f"{label}_pre_pick")
         if not pre_pick_ok:
-            self.get_logger().warn(f"{label}_pre_pick 未完全收敛，继续执行")
+            pre_pick_ok = self._cs612_2_cup_near_target(
+                pickup_above_tcp, f"{label}_pre_pick_tcp_check", xy_tol=0.060, z_tol=0.120
+            )
+        if not pre_pick_ok:
+            self.get_logger().warn(f"{label}_pre_pick 未完全收敛且 TCP 未到位，继续尝试 touch 前会再次校验")
         touch_ok = self._move_cs612_2_joint(solved["touch_pick"], f"{label}_touch_pick")
         if not touch_ok:
-            self.get_logger().warn(f"{label}_touch_pick 未完全收敛，继续执行")
+            touch_ok = self._cs612_2_cup_near_target(
+                pickup_touch_tcp, f"{label}_touch_pick_tcp_check", xy_tol=0.030, z_tol=0.070
+            )
+        if not touch_ok:
+            self.get_logger().warn(f"{label}_touch_pick 未完全收敛且 TCP 未到抓取接触点")
         # ── 吸附：仅在预抓/触碰都收敛时才 attach ──
         contact_ok = pre_pick_ok and touch_ok
         if contact_ok:
@@ -3011,9 +3109,26 @@ class AutoPickPlaceNode(Node):
 
         # ── 阶段 2: 抬起 → SetEntityPose 跟随 → 移动到 box2 上方 ──
         lift_ok = self._move_cs612_2_joint(solved["lift"], f"{label}_lift")
+        if not lift_ok:
+            self.get_logger().error(f"{label}_lift 未到位，停止二号臂接力，避免拖拽物体")
+            self._cs612_2_detach(label)
+            self._apply_released_rect_collision_scene(start, rect_half)
+            return False
         self._cs612_2_set_rect_pose_at_cup()
         time.sleep(0.15)
         box2_above_ok = self._move_cs612_2_joint(solved["box2_above"], f"{label}_transfer_above_box2")
+        if not box2_above_ok:
+            box2_above_ok = self._cs612_2_cup_near_target(
+                box2_above_tcp, f"{label}_transfer_above_box2_tcp_check", xy_tol=0.080, z_tol=0.140
+            )
+        if not box2_above_ok:
+            self.get_logger().error(
+                f"{label}_transfer_above_box2 未到位，停止二号臂继续拖拽物体；"
+                "立即按 box2 内腔目标释放"
+            )
+            box2_release_ok = self._cs612_2_release_rect_at_box2(target, rect_half, label)
+            self._move_cs612_2_joint(home, f"{label}_home")
+            return bool(pre_pick_ok and touch_ok and lift_ok and box2_release_ok)
         self._cs612_2_set_rect_pose_at_cup()
         time.sleep(0.1)
 
@@ -3042,17 +3157,28 @@ class AutoPickPlaceNode(Node):
             dt_override=0.10,
         )
         if not box2_place_ok:
-            self.get_logger().warn(f"{label}_box2_place_slow 未完全收敛，继续执行")
-        # 放置到位后再次同步物体到吸盘下方（确保 detach 前位置准确）
+            box2_place_ok = self._cs612_2_cup_near_target(
+                box2_touch_tcp, f"{label}_box2_place_slow_tcp_check", xy_tol=0.040, z_tol=0.090
+            )
+        if not box2_place_ok:
+            self.get_logger().error(
+                f"{label}_box2_place_slow 未完全收敛，跳过后续吸盘跟随；"
+                "立即按 box2 内腔目标释放"
+            )
+            box2_release_ok = self._cs612_2_release_rect_at_box2(target, rect_half, label)
+            self._move_cs612_2_joint(home, f"{label}_home")
+            return bool(pre_pick_ok and touch_ok and lift_ok and box2_release_ok)
+        # 放置到位后再次同步物体到吸盘下方；若未到位，后续 release 会用 box2 目标位姿兜底。
         self._cs612_2_set_rect_pose_at_cup()
         time.sleep(0.1)
 
-        self._cs612_2_detach(label)
-        time.sleep(0.4)
+        box2_release_ok = self._cs612_2_release_rect_at_box2(target, rect_half, label)
+        time.sleep(0.25)
         retreat_ok = self._move_cs612_2_joint(solved["retreat"], f"{label}_retreat")
-        self._apply_released_rect_collision_scene(target, rect_half)
+        if not retreat_ok:
+            self.get_logger().warn(f"{label}_retreat 未完全收敛；rect_pickup 已在 box2 内，继续回 home")
         self._move_cs612_2_joint(home, f"{label}_home")
-        ok = all([pre_pick_ok, touch_ok, lift_ok, box2_above_ok, box2_place_ok, retreat_ok])
+        ok = all([pre_pick_ok, touch_ok, lift_ok, box2_release_ok])
         if ok:
             self.get_logger().info("cs612_2 已将 rect_pickup 放入 box2")
         else:
